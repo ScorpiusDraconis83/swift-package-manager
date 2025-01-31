@@ -83,8 +83,7 @@ public struct BuildSettingCondition: Sendable {
     ///   - platforms: The applicable platforms for this build setting condition.
     ///   - configuration: The applicable build configuration for this build setting condition.
     ///   - traits: The applicable traits for this build setting condition.
-    @_spi(ExperimentalTraits)
-    @available(_PackageDescription, introduced: 999.0)
+    @available(_PackageDescription, introduced: 6.1)
     public static func when(
         platforms: [Platform]? = nil,
         configuration: BuildConfiguration? = nil,
@@ -387,8 +386,8 @@ public struct SwiftSetting: Sendable {
 
     /// Enable Swift interoperability with a given language.
     ///
-    /// This is useful for enabling interoperability with Swift and C++ for a given
-    /// target.
+    /// This is useful for enabling interoperability between Swift and C++ for
+    /// a given target.
     ///
     /// Enabling C++ interoperability mode might alter the way some existing
     /// C and Objective-C APIs are imported.
@@ -396,7 +395,7 @@ public struct SwiftSetting: Sendable {
     /// - Since: First available in PackageDescription 5.9.
     ///
     /// - Parameters:
-    ///   - mode: The language mode, either C or CXX.
+    ///   - mode: The language mode, either C or Cxx.
     ///   - condition: A condition that restricts the application of the build
     /// setting.
     @available(_PackageDescription, introduced: 5.9)
@@ -416,13 +415,30 @@ public struct SwiftSetting: Sendable {
     /// - Parameters:
     ///   - version: The Swift language version to use.
     ///   - condition: A condition that restricts the application of the build setting.
-    @available(_PackageDescription, introduced: 6.0)
+    @available(_PackageDescription, introduced: 6.0, deprecated: 6.0, renamed: "swiftLanguageMode(_:_:)")
     public static func swiftLanguageVersion(
       _ version: SwiftVersion,
       _ condition: BuildSettingCondition? = nil
     ) -> SwiftSetting {
         return SwiftSetting(
-            name: "swiftLanguageVersion", value: [.init(describing: version)], condition: condition)
+            name: "swiftLanguageMode", value: [.init(describing: version)], condition: condition)
+    }
+
+    /// Defines a `-language-mode` to pass  to the
+    /// corresponding build tool.
+    ///
+    /// - Since: First available in PackageDescription 6.0.
+    ///
+    /// - Parameters:
+    ///   - mode: The Swift language mode to use.
+    ///   - condition: A condition that restricts the application of the build setting.
+    @available(_PackageDescription, introduced: 6.0)
+    public static func swiftLanguageMode(
+      _ mode: SwiftLanguageMode,
+      _ condition: BuildSettingCondition? = nil
+    ) -> SwiftSetting {
+        return SwiftSetting(
+            name: "swiftLanguageMode", value: [.init(describing: mode)], condition: condition)
     }
 }
 

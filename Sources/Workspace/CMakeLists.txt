@@ -8,12 +8,12 @@
 
 add_library(Workspace
   CheckoutState.swift
-  DefaultPluginScriptRunner.swift
   Diagnostics.swift
   InitPackage.swift
   LoadableResult.swift
   ManagedArtifact.swift
   ManagedDependency.swift
+  ManagedPrebuilt.swift
   PackageContainer/FileSystemPackageContainer.swift
   PackageContainer/RegistryPackageContainer.swift
   PackageContainer/SourceControlPackageContainer.swift
@@ -28,8 +28,9 @@ add_library(Workspace
   Workspace+Editing.swift
   Workspace+Manifests.swift
   Workspace+PackageContainer.swift
-  Workspace+Pinning.swift
+  Workspace+Prebuilts.swift
   Workspace+Registry.swift
+  Workspace+ResolvedPackages.swift
   Workspace+Signing.swift
   Workspace+SourceControl.swift
   Workspace+State.swift)
@@ -38,6 +39,7 @@ target_link_libraries(Workspace PUBLIC
   TSCUtility
   Basics
   SPMBuildCore
+  SwiftCollections::OrderedCollections
   PackageFingerprint
   PackageGraph
   PackageLoading

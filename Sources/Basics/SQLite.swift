@@ -12,10 +12,18 @@
 
 import Foundation
 
+#if SWIFT_PACKAGE && (os(Windows) || os(Android))
+#if USE_IMPL_ONLY_IMPORTS
+@_implementationOnly import SwiftToolchainCSQLite
+#else
+import SwiftToolchainCSQLite
+#endif
+#else
 #if USE_IMPL_ONLY_IMPORTS
 @_implementationOnly import SPMSQLite3
 #else
 import SPMSQLite3
+#endif
 #endif
 
 /// A minimal SQLite wrapper.

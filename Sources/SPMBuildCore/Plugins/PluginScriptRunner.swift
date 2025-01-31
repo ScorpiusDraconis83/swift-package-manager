@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import _Concurrency
 import Foundation
 import PackageModel
 import PackageLoading
@@ -71,7 +72,7 @@ public extension PluginScriptRunner {
         callbackQueue: DispatchQueue,
         delegate: PluginScriptCompilerDelegate
     ) async throws -> PluginCompilationResult {
-        try await safe_async {
+        try await withCheckedThrowingContinuation { continuation in
             self.compilePluginScript(
                 sourceFiles: sourceFiles,
                 pluginName: pluginName,
@@ -79,7 +80,9 @@ public extension PluginScriptRunner {
                 observabilityScope: observabilityScope,
                 callbackQueue: callbackQueue,
                 delegate: delegate,
-                completion: $0
+                completion: {
+                  continuation.resume(with: $0)
+                }
             )
         }
     }

@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2023 Apple Inc. and the Swift project authors
+// Copyright (c) 2023-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -18,7 +18,7 @@ import XCTest
 
 import struct TSCBasic.ByteString
 import protocol TSCBasic.FileSystem
-import class TSCBasic.InMemoryFileSystem
+import class Workspace.Workspace
 
 private let testArtifactID = "test-artifact"
 
@@ -146,13 +146,13 @@ final class SwiftSDKBundleTests: XCTestCase {
         let cancellator = Cancellator(observabilityScope: observabilityScope)
         let archiver = UniversalArchiver(localFileSystem, cancellator)
 
-        let fixtureAndURLs: [(url: String, fixture: String)] = [
-            ("https://localhost/archive?test=foo", "test-sdk.artifactbundle.tar.gz"),
-            ("https://localhost/archive.tar.gz", "test-sdk.artifactbundle.tar.gz"),
-            ("https://localhost/archive.zip", "test-sdk.artifactbundle.zip"),
+        let fixtureAndURLs: [(url: String, fixture: String, checksum: String)] = [
+            ("https://localhost/archive?test=foo", "test-sdk.artifactbundle.tar.gz", "724b5abf125287517dbc5be9add055d4755dfca679e163b249ea1045f5800c6e"),
+            ("https://localhost/archive.tar.gz", "test-sdk.artifactbundle.tar.gz", "724b5abf125287517dbc5be9add055d4755dfca679e163b249ea1045f5800c6e"),
+            ("https://localhost/archive.zip", "test-sdk.artifactbundle.zip", "74f6df5aa91c582c12e3a6670ff95973e463dd3266aabbc52ad13c3cd27e2793"),
         ]
 
-        for (bundleURLString, fixture) in fixtureAndURLs {
+        for (bundleURLString, fixture, checksum) in fixtureAndURLs {
             let httpClient = HTTPClient { request, _ in
                 guard case let .download(_, downloadPath) = request.kind else {
                     XCTFail("Unexpected HTTPClient.Request.Kind")
@@ -173,12 +173,16 @@ final class SwiftSDKBundleTests: XCTestCase {
                         output.append($0)
                     }
                 )
-                try await store.install(bundlePathOrURL: bundleURLString, archiver, httpClient)
+                try await store.install(bundlePathOrURL: bundleURLString, checksum: checksum, archiver, httpClient) {
+                    try Workspace.BinaryArtifactsManager.checksum(forBinaryArtifactAt: $0, fileSystem: localFileSystem)
+                }
 
                 let bundleURL = URL(string: bundleURLString)!
                 XCTAssertEqual(output, [
                     .downloadStarted(bundleURL),
                     .downloadFinishedSuccessfully(bundleURL),
+                    .verifyingChecksum,
+                    .checksumValid,
                     .unpackingArchive(bundlePathOrURL: bundleURLString),
                     .installationSuccessful(
                         bundlePathOrURL: bundleURLString,
@@ -384,6 +388,7 @@ final class SwiftSDKBundleTests: XCTestCase {
             observabilityScope: system.topScope,
             outputHandler: { _ in }
         )
+        
         for bundle in bundles {
             try await store.install(bundlePathOrURL: bundle.path, archiver)
         }
@@ -398,6 +403,23 @@ final class SwiftSDKBundleTests: XCTestCase {
             )
             // By default, the target SDK is the same as the host SDK.
             XCTAssertEqual(targetSwiftSDK, hostSwiftSDK)
+        }
+
+        do {
+            let targetSwiftSDK = try SwiftSDK.deriveTargetSwiftSDK(
+                hostSwiftSDK: hostSwiftSDK,
+                hostTriple: hostTriple,
+                customCompileTriple: .arm64Linux,
+                store: store,
+                observabilityScope: system.topScope,
+                fileSystem: fileSystem
+            )
+
+            // With a custom target triple, toolset extra CLI options should be empty
+            XCTAssertEqual(targetSwiftSDK.toolset.rootPaths, hostSwiftSDK.toolset.rootPaths)
+            for tool in targetSwiftSDK.toolset.knownTools.values {
+                XCTAssertEqual(tool.extraCLIOptions, [])
+            }
         }
 
         do {
@@ -426,6 +448,19 @@ final class SwiftSDKBundleTests: XCTestCase {
             )
             // With toolset in the target SDK, it should contain the host toolset roots at the end.
             XCTAssertEqual(targetSwiftSDK.toolset.rootPaths, [toolsetRootPath] + hostSwiftSDK.toolset.rootPaths)
+        }
+
+        do {
+            let targetSwiftSDK = try SwiftSDK.deriveTargetSwiftSDK(
+                hostSwiftSDK: hostSwiftSDK,
+                hostTriple: hostTriple,
+                swiftSDKSelector: "wasm32-unknown-wasi",
+                store: store,
+                observabilityScope: system.topScope,
+                fileSystem: fileSystem
+            )
+            // Ensure that triples that have a `defaultSwiftSDK` are handled
+            XCTAssertEqual(targetSwiftSDK.targetTriple?.triple, "wasm32-unknown-wasi")
         }
 
         do {

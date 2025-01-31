@@ -18,7 +18,7 @@ import struct PackageGraph.ModulesGraph
 import struct PackageGraph.ResolvedModule
 import struct SPMBuildCore.BuildParameters
 import struct SPMBuildCore.BuildToolPluginInvocationResult
-import struct SPMBuildCore.PrebuildCommandResult
+import struct SPMBuildCore.CommandPluginResult
 
 @available(*, deprecated, renamed: "ClangModuleBuildDescription")
 public typealias ClangTargetBuildDescription = ClangModuleBuildDescription
@@ -42,6 +42,11 @@ public final class ClangModuleBuildDescription {
     /// The build parameters.
     let buildParameters: BuildParameters
 
+    /// The destination for while this module is built.
+    public var destination: BuildParameters.Destination {
+        self.buildParameters.destination
+    }
+
     /// The build environment.
     var buildEnvironment: BuildEnvironment {
         buildParameters.buildEnvironment
@@ -50,6 +55,16 @@ public final class ClangModuleBuildDescription {
     /// The list of all resource files in the target, including the derived ones.
     public var resources: [Resource] {
         self.target.underlying.resources + self.pluginDerivedResources
+    }
+
+    /// The list of files in the target that were marked as ignored.
+    public var ignored: [AbsolutePath] {
+        self.target.underlying.ignored
+    }
+
+    /// The list of other kinds of files in the target.
+    public var others: [AbsolutePath] {
+        self.target.underlying.others
     }
 
     /// Path to the bundle generated for this module (if any).
@@ -120,7 +135,7 @@ public final class ClangModuleBuildDescription {
         additionalFileRules: [FileRuleDescription] = [],
         buildParameters: BuildParameters,
         buildToolPluginInvocationResults: [BuildToolPluginInvocationResult] = [],
-        prebuildCommandResults: [PrebuildCommandResult] = [],
+        prebuildCommandResults: [CommandPluginResult] = [],
         fileSystem: FileSystem,
         observabilityScope: ObservabilityScope
     ) throws {
@@ -212,6 +227,11 @@ public final class ClangModuleBuildDescription {
     /// this module.
     package func symbolGraphExtractArguments() throws -> [String] {
         var args = [String]()
+
+        args += ["-module-name", self.target.c99name]
+        args += try self.buildParameters.tripleArgs(for: self.target)
+        args += ["-module-cache-path", try self.buildParameters.moduleCache.pathString]
+
         if self.clangTarget.isCXX {
             args += ["-cxx-interoperability-mode=default"]
         }
@@ -233,7 +253,8 @@ public final class ClangModuleBuildDescription {
     /// default value (possibly based on the filename suffix).
     public func basicArguments(
         isCXX isCXXOverride: Bool? = .none,
-        isC: Bool = false
+        isC: Bool = false,
+        isAsm: Bool = false
     ) throws -> [String] {
         // For now fall back on the hold semantics if the C++ nature isn't specified. This is temporary until clients
         // have been updated.
@@ -287,7 +308,7 @@ public final class ClangModuleBuildDescription {
         // Include the path to the resource header unless the arguments are
         // being evaluated for a C file. A C file cannot depend on the resource
         // accessor header due to it exporting a Foundation type (`NSBundle`).
-        if let resourceAccessorHeaderFile, !isC {
+        if let resourceAccessorHeaderFile, !isC && !isAsm {
             args += ["-include", resourceAccessorHeaderFile.pathString]
         }
 
@@ -367,8 +388,9 @@ public final class ClangModuleBuildDescription {
 
         let isCXX = path.source.extension.map { SupportedLanguageExtension.cppExtensions.contains($0) } ?? false
         let isC = path.source.extension.map { $0 == SupportedLanguageExtension.c.rawValue } ?? false
+        let isAsm = path.source.extension.map { SupportedLanguageExtension.assemblyExtensions.contains($0) } ?? false
 
-        var args = try basicArguments(isCXX: isCXX, isC: isC)
+        var args = try basicArguments(isCXX: isCXX, isC: isC, isAsm: isAsm)
 
         args += ["-MD", "-MT", "dependencies", "-MF", path.deps.pathString]
 
@@ -492,6 +514,7 @@ public final class ClangModuleBuildDescription {
 
         let headerContent =
             """
+            #if __OBJC__
             #import <Foundation/Foundation.h>
 
             #if __cplusplus
@@ -505,6 +528,7 @@ public final class ClangModuleBuildDescription {
             #if __cplusplus
             }
             #endif
+            #endif
             """
 
         let headerFile = derivedSources.root.appending("resource_bundle_accessor.h")
@@ -514,5 +538,19 @@ public final class ClangModuleBuildDescription {
             path: headerFile,
             string: headerContent
         )
+    }
+}
+
+extension ClangModuleBuildDescription {
+    package func dependencies(
+        using plan: BuildPlan
+    ) -> [ModuleBuildDescription.Dependency] {
+        ModuleBuildDescription.clang(self).dependencies(using: plan)
+    }
+
+    package func recursiveDependencies(
+        using plan: BuildPlan
+    ) -> [ModuleBuildDescription.Dependency] {
+        ModuleBuildDescription.clang(self).recursiveDependencies(using: plan)
     }
 }

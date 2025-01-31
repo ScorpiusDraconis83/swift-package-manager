@@ -201,7 +201,7 @@ fileprivate extension SourceCodeFragment {
         else {
             var params: [SourceCodeFragment] = []
             params.append(SourceCodeFragment(key: "name", string: product.name))
-            if !product.targets.isEmpty {
+            if !product.targets.isEmpty && !product.type.isLibrary {
                 params.append(SourceCodeFragment(key: "targets", strings: product.targets))
             }
             switch product.type {
@@ -209,21 +209,24 @@ fileprivate extension SourceCodeFragment {
                 if type != .automatic {
                     params.append(SourceCodeFragment(key: "type", enum: type.rawValue))
                 }
-	            self.init(enum: "library", subnodes: params, multiline: true)
-	        case .executable:
-	            self.init(enum: "executable", subnodes: params, multiline: true)
-	        case .snippet:
-	            self.init(enum: "sample", subnodes: params, multiline: true)
-	        case .plugin:
-	            self.init(enum: "plugin", subnodes: params, multiline: true)
-	        case .test:
-	            self.init(enum: "test", subnodes: params, multiline: true)
+                if !product.targets.isEmpty {
+                    params.append(SourceCodeFragment(key: "targets", strings: product.targets))
+                }
+                self.init(enum: "library", subnodes: params, multiline: true)
+            case .executable:
+                self.init(enum: "executable", subnodes: params, multiline: true)
+            case .snippet:
+                self.init(enum: "sample", subnodes: params, multiline: true)
+            case .plugin:
+                self.init(enum: "plugin", subnodes: params, multiline: true)
+            case .test:
+                self.init(enum: "test", subnodes: params, multiline: true)
             case .macro:
                 self.init(enum: "macro", subnodes: params, multiline: true)
             }
         }
     }
-    
+
     /// Instantiates a SourceCodeFragment to represent a single target.
     init(from target: TargetDescription) {
         var params: [SourceCodeFragment] = []
@@ -317,8 +320,6 @@ fileprivate extension SourceCodeFragment {
             self.init(enum: "plugin", subnodes: params, multiline: true)
         case .macro:
             self.init(enum: "macro", subnodes: params, multiline: true)
-        case .providedLibrary:
-            self.init(enum: "providedLibrary", subnodes: params, multiline: true)
         }
     }
 
@@ -527,7 +528,7 @@ fileprivate extension SourceCodeFragment {
                 params.append(SourceCodeFragment(from: condition))
             }
             self.init(enum: setting.kind.name, subnodes: params)
-        case .swiftLanguageVersion(let version):
+        case .swiftLanguageMode(let version):
             params.append(SourceCodeFragment(from: version))
             if let condition = setting.condition {
                 params.append(SourceCodeFragment(from: condition))
@@ -685,8 +686,8 @@ extension TargetBuildSettingDescription.Kind {
             return "enableUpcomingFeature"
         case .enableExperimentalFeature:
             return "enableExperimentalFeature"
-        case .swiftLanguageVersion:
-            return "swiftLanguageVersion"
+        case .swiftLanguageMode:
+            return "swiftLanguageMode"
         }
     }
 }

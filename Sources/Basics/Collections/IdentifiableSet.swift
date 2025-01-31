@@ -42,6 +42,10 @@ public struct IdentifiableSet<Element: Identifiable>: Collection {
         Index(storageIndex: self.storage.elements.endIndex)
     }
 
+    public var values: some Sequence<Element> {
+        self.storage.values
+    }
+
     public subscript(position: Index) -> Element {
         self.storage.elements[position.storageIndex].value
     }
@@ -116,5 +120,11 @@ extension IdentifiableSet: Hashable {
         for key in self.storage.keys {
             hasher.combine(key)
         }
+    }
+}
+
+extension IdentifiableSet: ExpressibleByArrayLiteral {
+    public init(arrayLiteral elements: Element...) {
+        self.init(elements)
     }
 }

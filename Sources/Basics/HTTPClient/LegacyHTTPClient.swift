@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import _Concurrency
 import Dispatch
 import struct Foundation.Data
 import struct Foundation.Date
@@ -48,7 +49,7 @@ public final class LegacyHTTPClient: Cancellable {
     private var outstandingRequests = ThreadSafeKeyValueStore<UUID, OutstandingRequest>()
 
     // static to share across instances of the http client
-    private static var hostsErrorsLock = NSLock()
+    private static let hostsErrorsLock = NSLock()
     private static var hostsErrors = [String: [Date]]()
 
     public init(configuration: LegacyHTTPClientConfiguration = .init(), handler: Handler? = nil) {
@@ -311,6 +312,17 @@ extension LegacyHTTPClient {
         _ url: URL,
         headers: HTTPClientHeaders = .init(),
         options: Request.Options = .init(),
+        observabilityScope: ObservabilityScope? = .none
+    ) async throws -> Response {
+        try await withCheckedThrowingContinuation { continuation in
+            self.head(url, headers: headers, options: options, completion: { continuation.resume(with: $0) })
+        }
+    }
+    @available(*, noasync, message: "Use the async alternative")
+    public func head(
+        _ url: URL,
+        headers: HTTPClientHeaders = .init(),
+        options: Request.Options = .init(),
         observabilityScope: ObservabilityScope? = .none,
         completion: @Sendable @escaping (Result<Response, Error>) -> Void
     ) {
@@ -321,6 +333,17 @@ extension LegacyHTTPClient {
         )
     }
 
+    public func get(
+        _ url: URL,
+        headers: HTTPClientHeaders = .init(),
+        options: Request.Options = .init(),
+        observabilityScope: ObservabilityScope? = .none
+    ) async throws -> Response {
+        try await withCheckedThrowingContinuation { continuation in
+            self.get(url, headers: headers, options: options, completion: { continuation.resume(with: $0) })
+        }
+    }
+    @available(*, noasync, message: "Use the async alternative")
     public func get(
         _ url: URL,
         headers: HTTPClientHeaders = .init(),

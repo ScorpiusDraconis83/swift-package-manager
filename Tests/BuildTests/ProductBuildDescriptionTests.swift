@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2014-2021 Apple Inc. and the Swift project authors
+// Copyright (c) 2014-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -13,8 +13,8 @@
 @testable
 import Build
 
+import class Basics.InMemoryFileSystem
 import class Basics.ObservabilitySystem
-import class TSCBasic.InMemoryFileSystem
 
 import class PackageModel.Manifest
 import struct PackageModel.TargetDescription
@@ -55,7 +55,7 @@ final class ProductBuildDescriptionTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let id = ResolvedProduct.ID(productName: "exe", packageIdentity: .plain("pkg"), buildTriple: .destination)
+        let id = ResolvedProduct.ID(productName: "exe", packageIdentity: .plain("pkg"))
         let package = try XCTUnwrap(graph.rootPackages.first)
         let product = try XCTUnwrap(graph.allProducts[id])
 

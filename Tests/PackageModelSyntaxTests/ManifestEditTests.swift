@@ -468,7 +468,7 @@ class ManifestEditTests: XCTestCase {
                     // These are the targets
                     .target(name: "MyLib"),
                     .executableTarget(
-                        name: "MyProgram",
+                        name: "MyProgram target-name",
                         dependencies: [
                             .product(name: "SwiftSyntax", package: "swift-syntax"),
                             .target(name: "TargetLib"),
@@ -479,13 +479,13 @@ class ManifestEditTests: XCTestCase {
             )
             """,
             expectedAuxiliarySources: [
-                RelativePath("Sources/MyProgram/MyProgram.swift") : """
+                RelativePath("Sources/MyProgram target-name/MyProgram target-name.swift") : """
                 import MyLib
                 import SwiftSyntax
                 import TargetLib
 
                 @main
-                struct MyProgramMain {
+                struct MyProgram_target_nameMain {
                     static func main() {
                         print("Hello, world")
                     }
@@ -494,7 +494,7 @@ class ManifestEditTests: XCTestCase {
             ]) { manifest in
             try AddTarget.addTarget(
                 TargetDescription(
-                    name: "MyProgram",
+                    name: "MyProgram target-name",
                     dependencies: [
                         .product(name: "SwiftSyntax", package: "swift-syntax"),
                         .target(name: "TargetLib", condition: nil),
@@ -528,7 +528,7 @@ class ManifestEditTests: XCTestCase {
                 ],
                 targets: [
                     .macro(
-                        name: "MyMacro",
+                        name: "MyMacro target-name",
                         dependencies: [
                             .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
                             .product(name: "SwiftSyntaxMacros", package: "swift-syntax")
@@ -538,33 +538,33 @@ class ManifestEditTests: XCTestCase {
             )
             """,
             expectedAuxiliarySources: [
-                RelativePath("Sources/MyMacro/MyMacro.swift") : """
+                RelativePath("Sources/MyMacro target-name/MyMacro target-name.swift") : """
                 import SwiftCompilerPlugin
                 import SwiftSyntaxMacros
 
-                struct MyMacro: Macro {
+                struct MyMacro_target_name: Macro {
                     /// TODO: Implement one or more of the protocols that inherit
                     /// from Macro. The appropriate macro protocol is determined
-                    /// by the "macro" declaration that MyMacro implements.
+                    /// by the "macro" declaration that MyMacro_target_name implements.
                     /// Examples include:
                     ///     @freestanding(expression) macro --> ExpressionMacro
                     ///     @attached(member) macro         --> MemberMacro
                 }
                 """,
-                RelativePath("Sources/MyMacro/ProvidedMacros.swift") : """
+                RelativePath("Sources/MyMacro target-name/ProvidedMacros.swift") : """
                 import SwiftCompilerPlugin
 
                 @main
-                struct MyMacroMacros: CompilerPlugin {
+                struct MyMacro_target_nameMacros: CompilerPlugin {
                     let providingMacros: [Macro.Type] = [
-                        MyMacro.self,
+                        MyMacro_target_name.self,
                     ]
                 }
                 """
                 ]
         ) { manifest in
             try AddTarget.addTarget(
-                TargetDescription(name: "MyMacro", type: .macro),
+                TargetDescription(name: "MyMacro target-name", type: .macro),
                 to: manifest
             )
         }
@@ -581,24 +581,18 @@ class ManifestEditTests: XCTestCase {
             // swift-tools-version: 5.5
             let package = Package(
                 name: "packages",
-                dependencies: [
-                    .package(url: "https://github.com/apple/swift-testing.git", from: "0.8.0"),
-                ],
                 targets: [
-                    .testTarget(
-                        name: "MyTest",
-                        dependencies: [ .product(name: "Testing", package: "swift-testing") ]
-                    ),
+                    .testTarget(name: "MyTest target-name"),
                 ]
             )
             """,
             expectedAuxiliarySources: [
-                RelativePath("Tests/MyTest/MyTest.swift") : """
+                RelativePath("Tests/MyTest target-name/MyTest target-name.swift") : """
                 import Testing
 
                 @Suite
-                struct MyTestTests {
-                    @Test("MyTest tests")
+                struct MyTest_target_nameTests {
+                    @Test("MyTest_target_name tests")
                     func example() {
                         #expect(42 == 17 + 25)
                     }
@@ -607,7 +601,7 @@ class ManifestEditTests: XCTestCase {
             ]) { manifest in
             try AddTarget.addTarget(
                 TargetDescription(
-                    name: "MyTest",
+                    name: "MyTest target-name",
                     type: .test
                 ),
                 to: manifest,
@@ -624,7 +618,7 @@ class ManifestEditTests: XCTestCase {
             let package = Package(
                 name: "packages",
                 dependencies: [
-                    .package(url: "https://github.com/apple/swift-testing.git", from: "0.8.0"),
+                    .package(url: "https://github.com/swiftlang/swift-example.git", from: "1.2.3"),
                 ],
                 targets: [
                     .testTarget(
@@ -638,20 +632,20 @@ class ManifestEditTests: XCTestCase {
             let package = Package(
                 name: "packages",
                 dependencies: [
-                    .package(url: "https://github.com/apple/swift-testing.git", from: "0.8.0"),
+                    .package(url: "https://github.com/swiftlang/swift-example.git", from: "1.2.3"),
                 ],
                 targets: [
                     .testTarget(
                         name: "MyTest",
                         dependencies: [
-                            .product(name: "Testing", package: "swift-testing"),
+                            .product(name: "SomethingOrOther", package: "swift-example"),
                         ]
                     ),
                 ]
             )
             """) { manifest in
             try AddTargetDependency.addTargetDependency(
-                .product(name: "Testing", package: "swift-testing"),
+                .product(name: "SomethingOrOther", package: "swift-example"),
                 targetName: "MyTest",
                 to: manifest
             )

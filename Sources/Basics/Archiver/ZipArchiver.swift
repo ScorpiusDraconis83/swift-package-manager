@@ -13,6 +13,10 @@
 import Dispatch
 import struct TSCBasic.FileSystemError
 
+#if os(Windows)
+import WinSDK
+#endif
+
 /// An `Archiver` that handles ZIP archives using the command-line `zip` and `unzip` tools.
 public struct ZipArchiver: Archiver, Cancellable {
     public var supportedExtensions: Set<String> { ["zip"] }
@@ -23,6 +27,11 @@ public struct ZipArchiver: Archiver, Cancellable {
     /// Helper for cancelling in-flight requests
     private let cancellator: Cancellator
 
+    /// Absolute path to the Windows tar in the system folder
+    #if os(Windows)
+    private let windowsTar: String
+    #endif
+
     /// Creates a `ZipArchiver`.
     ///
     /// - Parameters:
@@ -31,6 +40,19 @@ public struct ZipArchiver: Archiver, Cancellable {
     public init(fileSystem: FileSystem, cancellator: Cancellator? = .none) {
         self.fileSystem = fileSystem
         self.cancellator = cancellator ?? Cancellator(observabilityScope: .none)
+
+        #if os(Windows)
+        var tarPath: PWSTR?
+        defer { CoTaskMemFree(tarPath) }
+        let hr = withUnsafePointer(to: FOLDERID_System) { id in
+            SHGetKnownFolderPath(id, DWORD(KF_FLAG_DEFAULT.rawValue), nil, &tarPath)
+        }
+        if hr == S_OK, let tarPath {
+            windowsTar = String(decodingCString: tarPath, as: UTF16.self) + "\\tar.exe"
+        } else {
+            windowsTar = "tar.exe"
+        }
+        #endif
     }
 
     public func extract(
@@ -48,7 +70,9 @@ public struct ZipArchiver: Archiver, Cancellable {
             }
 
             #if os(Windows)
-            let process = AsyncProcess(arguments: ["tar.exe", "xf", archivePath.pathString, "-C", destinationPath.pathString])
+            // FileManager lost the ability to detect tar.exe as executable.
+            // It's part of system32 anyway so use the absolute path.
+            let process = AsyncProcess(arguments: [windowsTar, "xf", archivePath.pathString, "-C", destinationPath.pathString])
             #else
             let process = AsyncProcess(arguments: ["unzip", archivePath.pathString, "-d", destinationPath.pathString])
             #endif
@@ -73,52 +97,44 @@ public struct ZipArchiver: Archiver, Cancellable {
 
     public func compress(
         directory: AbsolutePath,
-        to destinationPath: AbsolutePath,
-        completion: @escaping @Sendable (Result<Void, Error>) -> Void
-    ) {
-        do {
-            guard self.fileSystem.isDirectory(directory) else {
-                throw FileSystemError(.notDirectory, directory.underlying)
-            }
+        to destinationPath: AbsolutePath
+    ) async throws {
+        guard self.fileSystem.isDirectory(directory) else {
+            throw FileSystemError(.notDirectory, directory.underlying)
+        }
 
-            #if os(Windows)
-            let process = AsyncProcess(
-                // FIXME: are these the right arguments?
-                arguments: ["tar.exe", "-a", "-c", "-f", destinationPath.pathString, directory.basename],
-                workingDirectory: directory.parentDirectory
-            )
-            #else
-            // This is to work around `swift package-registry publish` tool failing on
-            // Amazon Linux 2 due to it having an earlier Glibc version (rdar://116370323)
-            // and therefore posix_spawn_file_actions_addchdir_np is unavailable.
-            // Instead of passing `workingDirectory` param to TSC.Process, which will trigger
-            // SPM_posix_spawn_file_actions_addchdir_np_supported check, we shell out and
-            // do `cd` explicitly before `zip`.
-            let process = AsyncProcess(
-                arguments: [
-                    "/bin/sh",
-                    "-c",
-                    "cd \(directory.parentDirectory.underlying.pathString) && zip -r \(destinationPath.pathString) \(directory.basename)",
-                ]
-            )
-            #endif
+        #if os(Windows)
+        let process = AsyncProcess(
+            // FIXME: are these the right arguments?
+            arguments: [windowsTar, "-a", "-c", "-f", destinationPath.pathString, directory.basename],
+            workingDirectory: directory.parentDirectory
+        )
+        #else
+        // This is to work around `swift package-registry publish` tool failing on
+        // Amazon Linux 2 due to it having an earlier Glibc version (rdar://116370323)
+        // and therefore posix_spawn_file_actions_addchdir_np is unavailable.
+        // Instead of passing `workingDirectory` param to TSC.Process, which will trigger
+        // SPM_posix_spawn_file_actions_addchdir_np_supported check, we shell out and
+        // do `cd` explicitly before `zip`.
+        let process = AsyncProcess(
+            arguments: [
+                "/bin/sh",
+                "-c",
+                "cd \(directory.parentDirectory.underlying.pathString) && zip -r \(destinationPath.pathString) \(directory.basename)",
+            ]
+        )
+        #endif
 
-            guard let registrationKey = self.cancellator.register(process) else {
-                throw CancellationError.failedToRegisterProcess(process)
-            }
+        guard let registrationKey = self.cancellator.register(process) else {
+            throw CancellationError.failedToRegisterProcess(process)
+        }
 
-            DispatchQueue.sharedConcurrent.async {
-                defer { self.cancellator.deregister(registrationKey) }
-                completion(.init(catching: {
-                    try process.launch()
-                    let processResult = try process.waitUntilExit()
-                    guard processResult.exitStatus == .terminated(code: 0) else {
-                        throw try StringError(processResult.utf8stderrOutput())
-                    }
-                }))
-            }
-        } catch {
-            return completion(.failure(error))
+        defer { self.cancellator.deregister(registrationKey) }
+
+        try process.launch()
+        let processResult = try await process.waitUntilExit()
+        guard processResult.exitStatus == .terminated(code: 0) else {
+            throw try StringError(processResult.utf8stderrOutput())
         }
     }
 
@@ -129,7 +145,7 @@ public struct ZipArchiver: Archiver, Cancellable {
             }
 
             #if os(Windows)
-            let process = AsyncProcess(arguments: ["tar.exe", "tf", path.pathString])
+            let process = AsyncProcess(arguments: [windowsTar, "tf", path.pathString])
             #else
             let process = AsyncProcess(arguments: ["unzip", "-t", path.pathString])
             #endif

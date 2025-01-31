@@ -10,14 +10,15 @@
 //
 //===----------------------------------------------------------------------===//
 
+import _Concurrency
+
 import struct Basics.AbsolutePath
 import protocol Basics.FileSystem
 import struct Basics.InternalError
 import class Basics.ObservabilityScope
 import struct Basics.SourceControlURL
 import class Basics.ThreadSafeKeyValueStore
-import func Basics.temp_await
-import class PackageGraph.PinsStore
+import class PackageGraph.ResolvedPackagesStore
 import protocol PackageLoading.ManifestLoaderProtocol
 import protocol PackageModel.DependencyMapper
 import protocol PackageModel.IdentityResolver
@@ -219,7 +220,7 @@ extension Workspace {
                                     info: "swizzling '\(dependency.locationString)' with registry dependency '\(registryIdentity)'."
                                 )
                             targetDependencyPackageNameTransformations[dependency
-                                .nameForModuleDependencyResolutionOnly] = registryIdentity.description
+                                .nameForModuleDependencyResolutionOnly.lowercased()] = registryIdentity.description
                             modifiedDependency = .registry(
                                 identity: registryIdentity,
                                 requirement: requirement,
@@ -256,11 +257,17 @@ extension Workspace {
                     var modifiedDependencies = [TargetDescription.Dependency]()
                     for dependency in target.dependencies {
                         var modifiedDependency = dependency
-                        if case .product(let name, let packageName, let moduleAliases, let condition) = dependency,
-                           let packageName
-                        {
-                            // makes sure we use the updated package name for target based dependencies
-                            if let modifiedPackageName = targetDependencyPackageNameTransformations[packageName] {
+                        switch dependency {
+                        case .product(
+                            name: let name,
+                            package: let packageName,
+                            moduleAliases: let moduleAliases,
+                            condition: let condition
+                        ):
+                            if let packageName,
+                               // makes sure we use the updated package name for target based dependencies
+                               let modifiedPackageName = targetDependencyPackageNameTransformations[packageName.lowercased()]
+                            {
                                 modifiedDependency = .product(
                                     name: name,
                                     package: modifiedPackageName,
@@ -268,6 +275,17 @@ extension Workspace {
                                     condition: condition
                                 )
                             }
+                        case .byName(name: let packageName, condition: let condition):
+                            if let modifiedPackageName = targetDependencyPackageNameTransformations[packageName.lowercased()] {
+                                modifiedDependency = .product(
+                                    name: packageName,
+                                    package: modifiedPackageName,
+                                    moduleAliases: [:],
+                                    condition: condition
+                                )
+                            }
+                        case .target:
+                            break
                         }
                         modifiedDependencies.append(modifiedDependency)
                     }
@@ -391,18 +409,15 @@ extension Workspace {
         package: PackageReference,
         at version: Version,
         observabilityScope: ObservabilityScope
-    ) throws -> AbsolutePath {
+    ) async throws -> AbsolutePath {
         // FIXME: this should not block
-        let downloadPath = try temp_await {
-            self.registryDownloadsManager.lookup(
-                package: package.identity,
-                version: version,
-                observabilityScope: observabilityScope,
-                delegateQueue: .sharedConcurrent,
-                callbackQueue: .sharedConcurrent,
-                completion: $0
-            )
-        }
+        let downloadPath = try await self.registryDownloadsManager.lookup(
+            package: package.identity,
+            version: version,
+            observabilityScope: observabilityScope,
+            delegateQueue: .sharedConcurrent,
+            callbackQueue: .sharedConcurrent
+        )
 
         // Record the new state.
         observabilityScope.emit(
@@ -423,18 +438,18 @@ extension Workspace {
 
     func downloadRegistryArchive(
         package: PackageReference,
-        at pinState: PinsStore.PinState,
+        at resolutionState: ResolvedPackagesStore.ResolutionState,
         observabilityScope: ObservabilityScope
-    ) throws -> AbsolutePath {
-        switch pinState {
+    ) async throws -> AbsolutePath {
+        switch resolutionState {
         case .version(let version, _):
-            return try self.downloadRegistryArchive(
+            return try await self.downloadRegistryArchive(
                 package: package,
                 at: version,
                 observabilityScope: observabilityScope
             )
         default:
-            throw InternalError("invalid pin state: \(pinState)")
+            throw InternalError("invalid resolution state: \(resolutionState)")
         }
     }
 

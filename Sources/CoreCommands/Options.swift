@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2014-2023 Apple Inc. and the Swift project authors
+// Copyright (c) 2014-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -14,8 +14,8 @@ import ArgumentParser
 
 import var Basics.localFileSystem
 import struct Basics.AbsolutePath
+import enum Basics.TestingLibrary
 import struct Basics.Triple
-import func Basics.temp_await
 
 import struct Foundation.URL
 
@@ -25,6 +25,7 @@ import struct PackageModel.EnabledSanitizers
 import struct PackageModel.PackageIdentity
 import class PackageModel.Manifest
 import enum PackageModel.Sanitizer
+@_spi(SwiftPMInternal) import struct PackageModel.SwiftSDK
 
 import struct PackageGraph.TraitConfiguration
 
@@ -123,6 +124,17 @@ public struct LocationOptions: ParsableArguments {
         completion: .directory
     )
     public var swiftSDKsDirectory: AbsolutePath?
+    
+    @Option(
+        name: .customLong("toolset"),
+        help: """
+            Specify a toolset JSON file to use when building for the target platform. \
+            Use the option multiple times to specify more than one toolset. Toolsets will be merged in the order \
+            they're specified into a single final toolset for the current build.
+            """,
+        completion: .file(extensions: [".json"])
+    )
+    public var toolsetPaths: [AbsolutePath] = []
 
     @Option(
         name: .customLong("pkg-config-path"),
@@ -161,7 +173,7 @@ public struct CachingOptions: ParsableArguments {
     /// Disables manifest caching.
     @Option(
         name: .customLong("manifest-cache"),
-        help: "Caching mode of Package.swift manifests (shared: shared cache, local: package's build directory, none: disabled"
+        help: "Caching mode of Package.swift manifests (shared: shared cache, local: package's build directory, none: disabled)"
     )
     public var manifestCachingMode: ManifestCachingMode = .shared
 
@@ -174,6 +186,12 @@ public struct CachingOptions: ParsableArguments {
             self.init(rawValue: argument)
         }
     }
+
+    /// Whether to use macro prebuilts or not
+    @Flag(name: .customLong("experimental-prebuilts"),
+          inversion: .prefixedEnableDisable,
+          help: "Whether to use prebuilt swift-syntax libraries for macros")
+    public var usePrebuilts: Bool = false
 }
 
 public struct LoggingOptions: ParsableArguments {
@@ -313,7 +331,7 @@ public struct BuildOptions: ParsableArguments {
 
     /// Build configuration.
     @Option(name: .shortAndLong, help: "Build with configuration")
-    public var configuration: BuildConfiguration = .debug
+    public var configuration: BuildConfiguration?
 
     @Option(
         name: .customLong("Xcc", withSingleDash: true),
@@ -439,8 +457,20 @@ public struct BuildOptions: ParsableArguments {
     @Flag(help: "Enable or disable indexing-while-building feature")
     public var indexStoreMode: StoreMode = .autoIndexStore
 
+    /// Instead of building the target, perform the minimal amount of work to prepare it for indexing.
+    ///
+    /// This builds Swift module files for all dependencies but skips generation of object files. It also continues
+    /// building modules in the presence of compilation errors.
     @Flag(name: .customLong("experimental-prepare-for-indexing"), help: .hidden)
     var prepareForIndexing: Bool = false
+
+    /// Don't pass `-experimental-lazy-typecheck` during preparation.
+    ///
+    /// This is intended as a workaround if lazy type checking is causing compiler crashes.
+    ///
+    /// Only applicable in conjunction with `--experimental-prepare-for-indexing`
+    @Flag(name: .customLong("experimental-prepare-for-indexing-no-lazy"), help: .hidden)
+    var prepareForIndexingNoLazy: Bool = false
 
     /// Whether to enable generation of `.swiftinterface`s alongside `.swiftmodule`s.
     @Flag(name: .customLong("enable-parseable-module-interfaces"))
@@ -457,7 +487,7 @@ public struct BuildOptions: ParsableArguments {
 
     /// A flag that indicates this build should check whether targets only import
     /// their explicitly-declared dependencies
-    @Option()
+    @Option(help: "A flag that indicates this build should check whether targets only import their explicitly-declared dependencies")
     public var explicitTargetDependencyImportCheck: TargetDependencyImportCheckingMode = .none
 
     /// Whether to use the explicit module build flow (with the integrated driver)
@@ -469,7 +499,7 @@ public struct BuildOptions: ParsableArguments {
     var _buildSystem: BuildSystemProvider.Kind = .native
 
     /// The Debug Information Format to use.
-    @Option(name: .customLong("debug-info-format", withSingleDash: true))
+    @Option(name: .customLong("debug-info-format", withSingleDash: true), help: "The Debug Information Format to use")
     public var debugInfoFormat: DebugInfoFormat = .dwarf
 
     public var buildSystem: BuildSystemProvider.Kind {
@@ -514,7 +544,7 @@ public struct BuildOptions: ParsableArguments {
         case disableIndexStore
     }
 
-    public enum TargetDependencyImportCheckingMode: String, Codable, ExpressibleByArgument {
+    public enum TargetDependencyImportCheckingMode: String, Codable, ExpressibleByArgument, CaseIterable {
         case none
         case warn
         case error
@@ -529,7 +559,7 @@ public struct BuildOptions: ParsableArguments {
     }
 
     /// See `BuildParameters.DebugInfoFormat` for details.
-    public enum DebugInfoFormat: String, Codable, ExpressibleByArgument {
+    public enum DebugInfoFormat: String, Codable, ExpressibleByArgument, CaseIterable {
         /// See `BuildParameters.DebugInfoFormat.dwarf` for details.
         case dwarf
         /// See `BuildParameters.DebugInfoFormat.codeview` for details.
@@ -568,83 +598,52 @@ public struct TestLibraryOptions: ParsableArguments {
           help: "Enable support for XCTest")
     public var explicitlyEnableXCTestSupport: Bool?
 
-    /// Whether to enable support for XCTest.
-    public var enableXCTestSupport: Bool {
-        // Default to enabled.
-        explicitlyEnableXCTestSupport ?? true
-    }
-
-    /// Whether to enable support for swift-testing (as explicitly specified by the user.)
+    /// Whether to enable support for Swift Testing (as explicitly specified by the user.)
     ///
-    /// Callers (other than `swift package init`) will generally want to use
-    /// ``enableSwiftTestingLibrarySupport(swiftCommandState:)`` since it will
-    /// take into account whether the package has a dependency on swift-testing.
-    @Flag(name: .customLong("experimental-swift-testing"),
+    /// Callers will generally want to use ``enableSwiftTestingLibrarySupport`` since it will
+    /// have the correct default value if the user didn't specify one.
+    @Flag(name: .customLong("swift-testing"),
           inversion: .prefixedEnableDisable,
-          help: "Enable experimental support for swift-testing")
+          help: "Enable support for Swift Testing")
     public var explicitlyEnableSwiftTestingLibrarySupport: Bool?
 
-    /// Whether to enable support for swift-testing.
-    public func enableSwiftTestingLibrarySupport(
-        swiftCommandState: SwiftCommandState
-    ) throws -> Bool {
-        // Honor the user's explicit command-line selection, if any.
-        if let callerSuppliedValue = explicitlyEnableSwiftTestingLibrarySupport {
-            return callerSuppliedValue
-        }
+    /// Legacy experimental equivalent of ``explicitlyEnableSwiftTestingLibrarySupport``.
+    ///
+    /// This option will be removed in a future update.
+    @Flag(name: .customLong("experimental-swift-testing"),
+          inversion: .prefixedEnableDisable,
+          help: .private)
+    public var explicitlyEnableExperimentalSwiftTestingLibrarySupport: Bool?
 
-        // If the active package has a dependency on swift-testing, automatically enable support for it so that extra steps are not needed.
-        let workspace = try swiftCommandState.getActiveWorkspace()
-        let root = try swiftCommandState.getWorkspaceRoot()
-        let rootManifests = try temp_await {
-            workspace.loadRootManifests(
-                packages: root.packages,
-                observabilityScope: swiftCommandState.observabilityScope,
-                completion: $0
-            )
+    /// The common implementation for `isEnabled()` and `isExplicitlyEnabled()`.
+    ///
+    /// It is intentional that `isEnabled()` is not simply this function with a
+    /// default value for the `default` argument. There's no "true" default
+    /// value to use; it depends on the semantics the caller is interested in.
+    private func isEnabled(_ library: TestingLibrary, `default`: Bool, swiftCommandState: SwiftCommandState) -> Bool {
+        switch library {
+        case .xctest:
+            if let explicitlyEnableXCTestSupport {
+                return explicitlyEnableXCTestSupport
+            }
+            if let toolchain = try? swiftCommandState.getHostToolchain(),
+               toolchain.swiftSDK.xctestSupport == .supported {
+                return `default`
+            }
+            return false
+        case .swiftTesting:
+            return explicitlyEnableSwiftTestingLibrarySupport ?? explicitlyEnableExperimentalSwiftTestingLibrarySupport ?? `default`
         }
-
-        // Is swift-testing among the dependencies of the package being built?
-        // If so, enable support.
-        let isEnabledByDependency = rootManifests.values.lazy
-            .flatMap(\.dependencies)
-            .map(\.identity)
-            .map(String.init(describing:))
-            .contains("swift-testing")
-        if isEnabledByDependency {
-            swiftCommandState.observabilityScope.emit(debug: "Enabling swift-testing support due to its presence as a package dependency.")
-            return true
-        }
-
-        // Is swift-testing the package being built itself (unlikely)? If so,
-        // enable support.
-        let isEnabledByName = root.packages.lazy
-            .map(PackageIdentity.init(path:))
-            .map(String.init(describing:))
-            .contains("swift-testing")
-        if isEnabledByName {
-            swiftCommandState.observabilityScope.emit(debug: "Enabling swift-testing support because it is a root package.")
-            return true
-        }
-
-        // Default to disabled since swift-testing is experimental (opt-in.)
-        return false
     }
 
-    /// Get the set of enabled testing libraries.
-    public func enabledTestingLibraries(
-        swiftCommandState: SwiftCommandState
-    ) throws -> Set<BuildParameters.Testing.Library> {
-        var result = Set<BuildParameters.Testing.Library>()
+    /// Test whether or not a given library is enabled.
+    public func isEnabled(_ library: TestingLibrary, swiftCommandState: SwiftCommandState) -> Bool {
+        isEnabled(library, default: true, swiftCommandState: swiftCommandState)
+    }
 
-        if enableXCTestSupport {
-            result.insert(.xctest)
-        }
-        if try enableSwiftTestingLibrarySupport(swiftCommandState: swiftCommandState) {
-            result.insert(.swiftTesting)
-        }
-
-        return result
+    /// Test whether or not a given library was explicitly enabled by the developer.
+    public func isExplicitlyEnabled(_ library: TestingLibrary, swiftCommandState: SwiftCommandState) -> Bool {
+        isEnabled(library, default: false, swiftCommandState: swiftCommandState)
     }
 }
 
@@ -654,7 +653,7 @@ package struct TraitOptions: ParsableArguments {
 
     /// The traits to enable for the package.
     @Option(
-        name: .customLong("experimental-traits"),
+        name: .customLong("traits"),
         help: "Enables the passed traits of the package. Multiple traits can be specified by providing a space separated list e.g. `--traits Trait1 Trait2`. When enabling specific traits the defaults traits need to explictily enabled as well by passing `defaults` to this command."
     )
     package var _enabledTraits: String?
@@ -666,14 +665,14 @@ package struct TraitOptions: ParsableArguments {
 
     /// Enables all traits of the package.
     @Flag(
-        name: .customLong("experimental-enable-all-traits"),
+        name: .customLong("enable-all-traits"),
         help: "Enables all traits of the package."
     )
     package var enableAllTraits: Bool = false
 
     /// Disables all default traits of the package.
     @Flag(
-        name: .customLong("experimental-disable-default-traits"),
+        name: .customLong("disable-default-traits"),
         help: "Disables all default traits of the package."
     )
     public var disableDefaultTraits: Bool = false
@@ -765,20 +764,20 @@ extension URL {
 }
 
 #if compiler(<6.0)
-extension BuildConfiguration: ExpressibleByArgument {}
+extension BuildConfiguration: ExpressibleByArgument, CaseIterable {}
 extension AbsolutePath: ExpressibleByArgument {}
 extension WorkspaceConfiguration.CheckingMode: ExpressibleByArgument {}
 extension Sanitizer: ExpressibleByArgument {}
-extension BuildSystemProvider.Kind: ExpressibleByArgument {}
+extension BuildSystemProvider.Kind: ExpressibleByArgument, CaseIterable {}
 extension Version: ExpressibleByArgument {}
 extension PackageIdentity: ExpressibleByArgument {}
 extension URL: ExpressibleByArgument {}
 #else
-extension BuildConfiguration: @retroactive ExpressibleByArgument {}
+extension BuildConfiguration: @retroactive ExpressibleByArgument, CaseIterable {}
 extension AbsolutePath: @retroactive ExpressibleByArgument {}
 extension WorkspaceConfiguration.CheckingMode: @retroactive ExpressibleByArgument {}
 extension Sanitizer: @retroactive ExpressibleByArgument {}
-extension BuildSystemProvider.Kind: @retroactive ExpressibleByArgument {}
+extension BuildSystemProvider.Kind: @retroactive ExpressibleByArgument, CaseIterable {}
 extension Version: @retroactive ExpressibleByArgument {}
 extension PackageIdentity: @retroactive ExpressibleByArgument {}
 extension URL: @retroactive ExpressibleByArgument {}

@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import Foundation
 import Basics
 import struct Foundation.URL
 #if os(macOS)
@@ -432,7 +433,7 @@ extension InitPackage {
     public convenience init(
         name: String,
         packageType: PackageType,
-        supportedTestingLibraries: Set<BuildParameters.Testing.Library> = [.xctest],
+        supportedTestingLibraries: Set<TestingLibrary> = [.swiftTesting],
         destinationPath: AbsolutePath,
         fileSystem: FileSystem
     ) throws {
@@ -465,3 +466,8 @@ extension PackageIdentity: @retroactive ExpressibleByStringInterpolation {}
 extension AbsolutePath: @retroactive ExpressibleByStringLiteral {}
 extension AbsolutePath: @retroactive ExpressibleByStringInterpolation {}
 #endif
+
+public func getNumberOfMatches(of match: String, in value: String) -> Int {
+    guard match.count != 0 else { return 0 }
+    return value.ranges(of: match).count
+}

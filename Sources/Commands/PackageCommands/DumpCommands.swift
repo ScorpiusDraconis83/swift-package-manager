@@ -17,7 +17,7 @@ import Foundation
 import PackageModel
 import XCBuildSupport
 
-struct DumpSymbolGraph: SwiftCommand {
+struct DumpSymbolGraph: AsyncSwiftCommand {
     static let configuration = CommandConfiguration(
         abstract: "Dump Symbol Graph")
     static let defaultMinimumAccessLevel = SymbolGraphExtract.AccessLevel.public
@@ -43,17 +43,17 @@ struct DumpSymbolGraph: SwiftCommand {
     @Flag(help: "Emit extension block symbols for extensions to external types or directly associate members and conformances with the extended nominal.")
     var extensionBlockSymbolBehavior: ExtensionBlockSymbolBehavior = .omitExtensionBlockSymbols
 
-    func run(_ swiftCommandState: SwiftCommandState) throws {
+    func run(_ swiftCommandState: SwiftCommandState) async throws {
         // Build the current package.
         //
         // We turn build manifest caching off because we need the build plan.
-        let buildSystem = try swiftCommandState.createBuildSystem(
+        let buildSystem = try await swiftCommandState.createBuildSystem(
             explicitBuildSystem: .native,
             // We are enabling all traits for dumping the symbol graph.
             traitConfiguration: .init(enableAllTraits: true),
             cacheBuildManifest: false
         )
-        try buildSystem.build()
+        try await buildSystem.build()
 
         // Configure the symbol graph extractor.
         let symbolGraphExtractor = try SymbolGraphExtract(
@@ -70,14 +70,18 @@ struct DumpSymbolGraph: SwiftCommand {
 
         // Run the tool once for every library and executable target in the root package.
         let buildPlan = try buildSystem.buildPlan
+        let modulesGraph = try await buildSystem.getPackageGraph()
         let symbolGraphDirectory = buildPlan.destinationBuildParameters.dataPath.appending("symbolgraph")
-        let targets = try buildSystem.getPackageGraph().rootPackages.flatMap{ $0.modules }.filter{ $0.type == .library }
-        for target in targets {
-            print("-- Emitting symbol graph for", target.name)
+        for description in buildPlan.buildModules {
+            guard description.module.type == .library,
+                  modulesGraph.rootPackages[description.package.id] != nil
+            else {
+                continue
+            }
+
+            print("-- Emitting symbol graph for", description.module.name)
             let result = try symbolGraphExtractor.extractSymbolGraph(
-                module: target,
-                buildPlan: buildPlan,
-                buildParameters: buildPlan.destinationBuildParameters,
+                for: description,
                 outputRedirection: .collect(redirectStderr: true),
                 outputDirectory: symbolGraphDirectory,
                 verboseOutput: swiftCommandState.logLevel <= .info
@@ -87,9 +91,9 @@ struct DumpSymbolGraph: SwiftCommand {
                 let commandline = "\nUsing commandline: \(result.arguments)"
                 switch result.output {
                 case .success(let value):
-                    swiftCommandState.observabilityScope.emit(error: "Failed to emit symbol graph for '\(target.c99name)': \(String(decoding: value, as: UTF8.self))\(commandline)")
+                    swiftCommandState.observabilityScope.emit(error: "Failed to emit symbol graph for '\(description.module.c99name)': \(String(decoding: value, as: UTF8.self))\(commandline)")
                 case .failure(let error):
-                    swiftCommandState.observabilityScope.emit(error: "Internal error while emitting symbol graph for '\(target.c99name)': \(error)\(commandline)")
+                    swiftCommandState.observabilityScope.emit(error: "Internal error while emitting symbol graph for '\(description.module.c99name)': \(error)\(commandline)")
                 }
             }
         }
@@ -131,7 +135,7 @@ struct DumpPackage: AsyncSwiftCommand {
     }
 }
 
-struct DumpPIF: SwiftCommand {
+struct DumpPIF: AsyncSwiftCommand {
     // hides this command from CLI `--help` output
     static let configuration = CommandConfiguration(shouldDisplay: false) 
 
@@ -141,8 +145,8 @@ struct DumpPIF: SwiftCommand {
     @Flag(help: "Preserve the internal structure of PIF")
     var preserveStructure: Bool = false
 
-    func run(_ swiftCommandState: SwiftCommandState) throws {
-        let graph = try swiftCommandState.loadPackageGraph()
+    func run(_ swiftCommandState: SwiftCommandState) async throws {
+        let graph = try await swiftCommandState.loadPackageGraph()
         let pif = try PIFBuilder.generatePIF(
             buildParameters: swiftCommandState.productsBuildParameters,
             packageGraph: graph,

@@ -524,7 +524,7 @@ extension Manifest: Encodable {
     private enum CodingKeys: CodingKey {
         case name, path, url, version, targetMap, toolsVersion,
              pkgConfig, providers, cLanguageStandard, cxxLanguageStandard, swiftLanguageVersions,
-             dependencies, products, targets, experimentalTraits, platforms, packageKind, revision,
+             dependencies, products, targets, traits, platforms, packageKind, revision,
              defaultLocalization
     }
 
@@ -555,56 +555,8 @@ extension Manifest: Encodable {
         try container.encode(self.dependencies, forKey: .dependencies)
         try container.encode(self.products, forKey: .products)
         try container.encode(self.targets, forKey: .targets)
-        try container.encode(self.traits, forKey: .experimentalTraits)
+        try container.encode(self.traits, forKey: .traits)
         try container.encode(self.platforms, forKey: .platforms)
         try container.encode(self.packageKind, forKey: .packageKind)
-    }
-}
-
-extension Manifest {
-    package static func forProvidedLibrary(
-        fileSystem: FileSystem,
-        package: PackageReference,
-        libraryPath: AbsolutePath,
-        version: Version
-    ) throws -> Manifest {
-        let names = try fileSystem.getDirectoryContents(libraryPath).filter {
-            $0.hasSuffix("swiftmodule")
-        }.map {
-            let components = $0.split(separator: ".")
-            return String(components[0])
-        }
-
-        let products: [ProductDescription] = try names.map {
-            try .init(name: $0, type: .library(.automatic), targets: [$0])
-        }
-
-        let targets: [TargetDescription] = try names.map {
-            try .init(
-                name: $0,
-                path: libraryPath.pathString,
-                type: .providedLibrary
-            )
-        }
-
-        return .init(
-            displayName: package.identity.description,
-            path: libraryPath.appending(component: "provided-library.json"),
-            packageKind: package.kind,
-            packageLocation: package.locationString,
-            defaultLocalization: nil,
-            platforms: [],
-            version: version,
-            revision: nil,
-            toolsVersion: .v6_0,
-            pkgConfig: nil,
-            providers: nil,
-            cLanguageStandard: nil,
-            cxxLanguageStandard: nil,
-            swiftLanguageVersions: nil,
-            products: products,
-            targets: targets,
-            traits: []
-        )
     }
 }

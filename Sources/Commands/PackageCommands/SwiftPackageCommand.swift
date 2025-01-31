@@ -62,6 +62,7 @@ public struct SwiftPackageCommand: AsyncParsableCommand {
             Fetch.self,
 
             ShowDependencies.self,
+            ShowExecutables.self,
             ToolsVersionCommand.self,
             ComputeChecksum.self,
             ArchiveSource.self,
@@ -86,7 +87,7 @@ public struct SwiftPackageCommand: AsyncParsableCommand {
 extension SwiftPackageCommand {
     // This command is the default when no other subcommand is passed. It is not shown in the help and is never invoked
     // directly.
-    struct DefaultCommand: SwiftCommand {
+    struct DefaultCommand: AsyncSwiftCommand {
         static let configuration = CommandConfiguration(
             commandName: nil,
             shouldDisplay: false
@@ -101,7 +102,7 @@ extension SwiftPackageCommand {
         @Argument(parsing: .captureForPassthrough)
         var remaining: [String] = []
 
-        func run(_ swiftCommandState: SwiftCommandState) throws {
+        func run(_ swiftCommandState: SwiftCommandState) async throws {
             // See if have a possible plugin command.
             guard let command = remaining.first else {
                 print(SwiftPackageCommand.helpMessage())
@@ -116,7 +117,7 @@ extension SwiftPackageCommand {
             }
 
             // Otherwise see if we can find a plugin.
-            try PluginCommand.run(
+            try await PluginCommand.run(
                 command: command,
                 options: self.pluginOptions,
                 arguments: self.remaining,
