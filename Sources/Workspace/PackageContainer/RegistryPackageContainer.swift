@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2021 Apple Inc. and the Swift project authors
+// Copyright (c) 2021-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -11,13 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import _Concurrency
 import Dispatch
 import PackageGraph
 import PackageLoading
 import PackageModel
 import PackageRegistry
-
-import class TSCBasic.InMemoryFileSystem
 
 import struct TSCUtility.Version
 
@@ -32,9 +31,9 @@ public class RegistryPackageContainer: PackageContainer {
     private let observabilityScope: ObservabilityScope
 
     private var knownVersionsCache = ThreadSafeBox<[Version]>()
-    private var toolsVersionsCache = ThreadSafeKeyValueStore<Version, ToolsVersion>()
-    private var validToolsVersionsCache = ThreadSafeKeyValueStore<Version, Bool>()
-    private var manifestsCache = ThreadSafeKeyValueStore<Version, Manifest>()
+    private var toolsVersionsCache = ThrowingAsyncKeyValueMemoizer<Version, ToolsVersion>()
+    private var validToolsVersionsCache = AsyncKeyValueMemoizer<Version, Bool>()
+    private var manifestsCache = ThrowingAsyncKeyValueMemoizer<Version, Manifest>()
     private var availableManifestsCache = ThreadSafeKeyValueStore<Version, (manifests: [String: (toolsVersion: ToolsVersion, content: String?)], fileSystem: FileSystem)>()
 
     public init(
@@ -59,11 +58,11 @@ public class RegistryPackageContainer: PackageContainer {
 
     // MARK: - PackageContainer
 
-    public func isToolsVersionCompatible(at version: Version) -> Bool {
-        self.validToolsVersionsCache.memoize(version) {
+    public func isToolsVersionCompatible(at version: Version) async -> Bool {
+        await self.validToolsVersionsCache.memoize(version) {
             do {
-                let toolsVersion = try self.toolsVersion(for: version)
-                try toolsVersion.validateToolsVersion(currentToolsVersion, packageIdentity: package.identity)
+                let toolsVersion = try await self.toolsVersion(for: version)
+                try toolsVersion.validateToolsVersion(self.currentToolsVersion, packageIdentity: self.package.identity)
                 return true
             } catch {
                 return false
@@ -71,10 +70,12 @@ public class RegistryPackageContainer: PackageContainer {
         }
     }
 
-    public func toolsVersion(for version: Version) throws -> ToolsVersion {
-        try self.toolsVersionsCache.memoize(version) {
-            let result = try temp_await {
-                self.getAvailableManifestsFilesystem(version: version, completion: $0)
+    public func toolsVersion(for version: Version) async throws -> ToolsVersion {
+        try await self.toolsVersionsCache.memoize(version) {
+            let result = try await withCheckedThrowingContinuation { continuation in
+                self.getAvailableManifestsFilesystem(version: version, completion: {
+                    continuation.resume(with: $0)
+                })
             }
             // find the manifest path and parse it's tools-version
             let manifestPath = try ManifestLoader.findManifest(packagePath: .root, fileSystem: result.fileSystem, currentToolsVersion: self.currentToolsVersion)
@@ -82,30 +83,38 @@ public class RegistryPackageContainer: PackageContainer {
         }
     }
 
-    public func versionsDescending() throws -> [Version] {
-        try self.knownVersionsCache.memoize {
-            let metadata = try temp_await {
+    public func versionsDescending() async throws -> [Version] {
+        try await self.knownVersionsCache.memoize {
+            let metadata = try await withCheckedThrowingContinuation { continuation in
                 self.registryClient.getPackageMetadata(
                     package: self.package.identity,
                     observabilityScope: self.observabilityScope,
                     callbackQueue: .sharedConcurrent,
-                    completion: $0
+                    completion: {
+                        continuation.resume(with: $0)
+                    }
                 )
             }
             return metadata.versions.sorted(by: >)
         }
     }
 
-    public func versionsAscending() throws -> [Version] {
-        try self.versionsDescending().reversed()
+    public func versionsAscending() async throws -> [Version] {
+        try await self.versionsDescending().reversed()
     }
 
-    public func toolsVersionsAppropriateVersionsDescending() throws -> [Version] {
-        try self.versionsDescending().filter(self.isToolsVersionCompatible(at:))
+    public func toolsVersionsAppropriateVersionsDescending() async throws -> [Version] {
+        var results: [Version] = []
+        for version in try await self.versionsDescending() {
+            if await self.isToolsVersionCompatible(at: version) {
+                results.append(version)
+            }
+        }
+        return results
     }
 
-    public func getDependencies(at version: Version, productFilter: ProductFilter) throws -> [PackageContainerConstraint] {
-        let manifest = try self.loadManifest(version: version)
+    public func getDependencies(at version: Version, productFilter: ProductFilter) async throws -> [PackageContainerConstraint] {
+        let manifest = try await self.loadManifest(version: version)
         return try manifest.dependencyConstraints(productFilter: productFilter)
     }
 
@@ -122,14 +131,16 @@ public class RegistryPackageContainer: PackageContainer {
     }
 
     // marked internal for testing
-    internal func loadManifest(version: Version) throws -> Manifest {
-        return try self.manifestsCache.memoize(version) {
-            try temp_await {
-                self.loadManifest(version: version, completion: $0)
+    internal func loadManifest(version: Version) async throws -> Manifest {
+        return try await self.manifestsCache.memoize(version) {
+            try await withCheckedThrowingContinuation { continuation in
+                self.loadManifest(version: version, completion: {
+                    continuation.resume(with: $0)
+                })
             }
         }
     }
-    
+
     private func loadManifest(version: Version,  completion: @escaping (Result<Manifest, Error>) -> Void) {
         self.getAvailableManifestsFilesystem(version: version) { result in
             switch result {
@@ -188,6 +199,8 @@ public class RegistryPackageContainer: PackageContainer {
                                         if file == Manifest.basename + "@swift-\(preferredToolsVersion).swift" {
                                             return true
                                         } else if preferredToolsVersion.patch == 0, file == Manifest.basename + "@swift-\(preferredToolsVersion.major).\(preferredToolsVersion.minor).swift" {
+                                            return true
+                                        } else if preferredToolsVersion.patch == 0, preferredToolsVersion.minor == 0, file == Manifest.basename + "@swift-\(preferredToolsVersion.major).swift" {
                                             return true
                                         } else {
                                             return false

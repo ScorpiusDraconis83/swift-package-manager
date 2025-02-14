@@ -18,7 +18,7 @@ import SwiftSyntaxBuilder
 import struct TSCUtility.Version
 
 /// Add a target to a manifest's source code.
-public struct AddTarget {
+public enum AddTarget {
     /// The set of argument labels that can occur after the "targets"
     /// argument in the Package initializers.
     ///
@@ -27,7 +27,7 @@ public struct AddTarget {
     private static let argumentLabelsAfterTargets: Set<String> = [
         "swiftLanguageVersions",
         "cLanguageStandard",
-        "cxxLanguageStandard"
+        "cxxLanguageStandard",
     ]
 
     /// The kind of test harness to use. This isn't part of the manifest
@@ -84,13 +84,8 @@ public struct AddTarget {
             // SwiftSyntax.
             target.dependencies.append(contentsOf: macroTargetDependencies)
 
-        case .test where configuration.testHarness == .swiftTesting:
-            // Testing targets using swift-testing need to depend on
-            // SwiftTesting from the swift-testing package.
-            target.dependencies.append(contentsOf: swiftTestingTestTargetDependencies)
-
         default:
-            break;
+            break
         }
 
         var newPackageCall = try packageCall.appendingToArrayArgument(
@@ -100,7 +95,7 @@ public struct AddTarget {
         )
 
         let outerDirectory: String? = switch target.type {
-        case .binary, .plugin, .system, .providedLibrary: nil
+        case .binary, .plugin, .system: nil
         case .executable, .regular, .macro: "Sources"
         case .test: "Tests"
         }
@@ -108,7 +103,7 @@ public struct AddTarget {
         guard let outerDirectory else {
             return PackageEditResult(
                 manifestEdits: [
-                    .replace(packageCall, with: newPackageCall.description)
+                    .replace(packageCall, with: newPackageCall.description),
                 ]
             )
         }
@@ -119,7 +114,7 @@ public struct AddTarget {
         var auxiliaryFiles: AuxiliaryFiles = []
 
         // Add the primary source file. Every target type has this.
-        addPrimarySourceFile(
+        self.addPrimarySourceFile(
             outerPath: outerPath,
             target: target,
             configuration: configuration,
@@ -130,7 +125,7 @@ public struct AddTarget {
         var extraManifestEdits: [SourceEdit] = []
         switch target.type {
         case .macro:
-            addProvidedMacrosSourceFile(
+            self.addProvidedMacrosSourceFile(
                 outerPath: outerPath,
                 target: target,
                 to: &auxiliaryFiles
@@ -140,7 +135,7 @@ public struct AddTarget {
                 newPackageCall = try AddPackageDependency
                     .addPackageDependencyLocal(
                         .swiftSyntax(
-                          configuration: installedSwiftPMConfiguration
+                            configuration: installedSwiftPMConfiguration
                         ),
                         to: newPackageCall
                     )
@@ -154,7 +149,7 @@ public struct AddTarget {
                             .positionAfterSkippingLeadingTrivia
                         extraManifestEdits.append(
                             SourceEdit(
-                                range: insertPos..<insertPos,
+                                range: insertPos ..< insertPos,
                                 replacement: newImport
                             )
                         )
@@ -163,23 +158,12 @@ public struct AddTarget {
                 }
             }
 
-        case .test where configuration.testHarness == .swiftTesting:
-            if !manifest.description.contains("swift-testing") {
-                newPackageCall = try AddPackageDependency
-                    .addPackageDependencyLocal(
-                        .swiftTesting(
-                          configuration: installedSwiftPMConfiguration
-                        ),
-                        to: newPackageCall
-                    )
-            }
-
-        default: break;
+        default: break
         }
 
         return PackageEditResult(
             manifestEdits: [
-                .replace(packageCall, with: newPackageCall.description)
+                .replace(packageCall, with: newPackageCall.description),
             ] + extraManifestEdits,
             auxiliaryFiles: auxiliaryFiles
         )
@@ -198,22 +182,19 @@ public struct AddTarget {
         )
 
         // Introduce imports for each of the dependencies that were specified.
-        var importModuleNames = target.dependencies.map {
-            $0.name
-        }
+        var importModuleNames = target.dependencies.map(\.name)
 
         // Add appropriate test module dependencies.
         if target.type == .test {
             switch configuration.testHarness {
-            case .none: 
+            case .none:
                 break
 
             case .xctest:
                 importModuleNames.append("XCTest")
 
-            case .swiftTesting: 
-                // Import is handled by the added dependency.
-                break
+            case .swiftTesting:
+                importModuleNames.append("Testing")
             }
         }
 
@@ -228,16 +209,16 @@ public struct AddTarget {
         }
 
         let sourceFileText: SourceFileSyntax = switch target.type {
-        case .binary, .plugin, .system, .providedLibrary:
+        case .binary, .plugin, .system:
             fatalError("should have exited above")
 
         case .macro:
             """
             \(imports)
-            struct \(raw: target.name): Macro {
+            struct \(raw: target.sanitizedName): Macro {
                 /// TODO: Implement one or more of the protocols that inherit
                 /// from Macro. The appropriate macro protocol is determined
-                /// by the "macro" declaration that \(raw: target.name) implements.
+                /// by the "macro" declaration that \(raw: target.sanitizedName) implements.
                 /// Examples include:
                 ///     @freestanding(expression) macro --> ExpressionMacro
                 ///     @attached(member) macro         --> MemberMacro
@@ -255,8 +236,8 @@ public struct AddTarget {
             case .xctest:
                 """
                 \(imports)
-                class \(raw: target.name): XCTestCase {
-                    func test\(raw: target.name)() {
+                class \(raw: target.sanitizedName)Tests: XCTestCase {
+                    func test\(raw: target.sanitizedName)() {
                         XCTAssertEqual(42, 17 + 25)
                     }
                 }
@@ -266,8 +247,8 @@ public struct AddTarget {
                 """
                 \(imports)
                 @Suite
-                struct \(raw: target.name)Tests {
-                    @Test("\(raw: target.name) tests")
+                struct \(raw: target.sanitizedName)Tests {
+                    @Test("\(raw: target.sanitizedName) tests")
                     func example() {
                         #expect(42 == 17 + 25)
                     }
@@ -284,7 +265,7 @@ public struct AddTarget {
             """
             \(imports)
             @main
-            struct \(raw: target.name)Main {
+            struct \(raw: target.sanitizedName)Main {
                 static func main() {
                     print("Hello, world")
                 }
@@ -313,9 +294,9 @@ public struct AddTarget {
             import SwiftCompilerPlugin
 
             @main
-            struct \(raw: target.name)Macros: CompilerPlugin {
+            struct \(raw: target.sanitizedName)Macros: CompilerPlugin {
                 let providingMacros: [Macro.Type] = [
-                    \(raw: target.name).self,
+                    \(raw: target.sanitizedName).self,
                 ]
             }
             """
@@ -323,13 +304,13 @@ public struct AddTarget {
     }
 }
 
-fileprivate extension TargetDescription.Dependency {
+extension TargetDescription.Dependency {
     /// Retrieve the name of the dependency
-    var name: String {
+    fileprivate var name: String {
         switch self {
         case .target(name: let name, condition: _),
-            .byName(name: let name, condition: _),
-            .product(name: let name, package: _, moduleAliases: _, condition: _):
+             .byName(name: let name, condition: _),
+             .product(name: let name, package: _, moduleAliases: _, condition: _):
             name
         }
     }
@@ -337,11 +318,11 @@ fileprivate extension TargetDescription.Dependency {
 
 /// The array of auxiliary files that can be added by a package editing
 /// operation.
-fileprivate typealias AuxiliaryFiles = [(RelativePath, SourceFileSyntax)]
+private typealias AuxiliaryFiles = [(RelativePath, SourceFileSyntax)]
 
-fileprivate extension AuxiliaryFiles {
+extension AuxiliaryFiles {
     /// Add a source file to the list of auxiliary files.
-    mutating func addSourceFile(
+    fileprivate mutating func addSourceFile(
         path: RelativePath,
         sourceCode: SourceFileSyntax
     ) {
@@ -351,66 +332,42 @@ fileprivate extension AuxiliaryFiles {
 
 /// The set of dependencies we need to introduce to a newly-created macro
 /// target.
-fileprivate let macroTargetDependencies: [TargetDescription.Dependency] = [
+private let macroTargetDependencies: [TargetDescription.Dependency] = [
     .product(name: "SwiftCompilerPlugin", package: "swift-syntax"),
     .product(name: "SwiftSyntaxMacros", package: "swift-syntax"),
 ]
 
 /// The package dependency for swift-syntax, for use in macros.
-fileprivate extension PackageDependency {
+extension MappablePackageDependency.Kind {
     /// Source control URL for the swift-syntax package.
-    static var swiftSyntaxURL: SourceControlURL {
+    fileprivate static var swiftSyntaxURL: SourceControlURL {
         "https://github.com/swiftlang/swift-syntax.git"
     }
 
     /// Package dependency on the swift-syntax package.
-    static func swiftSyntax(
-      configuration: InstalledSwiftPMConfiguration
-    ) -> PackageDependency {
+    fileprivate static func swiftSyntax(
+        configuration: InstalledSwiftPMConfiguration
+    ) -> MappablePackageDependency.Kind {
         let swiftSyntaxVersionDefault = configuration
             .swiftSyntaxVersionForMacroTemplate
         let swiftSyntaxVersion = Version(swiftSyntaxVersionDefault.description)!
 
         return .sourceControl(
-            identity: PackageIdentity(url: swiftSyntaxURL),
-            nameForTargetDependencyResolutionOnly: nil,
-            location: .remote(swiftSyntaxURL),
-            requirement: .range(.upToNextMajor(from: swiftSyntaxVersion)),
-            productFilter: .everything,
-            traits: []
+            name: nil,
+            location: self.swiftSyntaxURL.absoluteString,
+            requirement: .range(.upToNextMajor(from: swiftSyntaxVersion))
         )
     }
 }
 
-/// The set of dependencies we need to introduce to a newly-created macro
-/// target.
-fileprivate let swiftTestingTestTargetDependencies: [TargetDescription.Dependency] = [
-    .product(name: "Testing", package: "swift-testing"),
-]
-
-
-/// The package dependency for swift-testing, for use in test files.
-fileprivate extension PackageDependency {
-    /// Source control URL for the swift-syntax package.
-    static var swiftTestingURL: SourceControlURL {
-        "https://github.com/apple/swift-testing.git"
+extension TargetDescription {
+    fileprivate var sanitizedName: String {
+        self.name
+            .spm_mangledToC99ExtendedIdentifier()
+            .localizedFirstWordCapitalized()
     }
+}
 
-    /// Package dependency on the swift-testing package.
-    static func swiftTesting(
-      configuration: InstalledSwiftPMConfiguration
-    ) -> PackageDependency {
-        let swiftTestingVersionDefault =
-            configuration.swiftTestingVersionForTestTemplate
-        let swiftTestingVersion = Version(swiftTestingVersionDefault.description)!
-
-        return .sourceControl(
-            identity: PackageIdentity(url: swiftTestingURL),
-            nameForTargetDependencyResolutionOnly: nil,
-            location: .remote(swiftTestingURL),
-            requirement: .range(.upToNextMajor(from: swiftTestingVersion)),
-            productFilter: .everything,
-            traits: []
-        )
-    }
+extension String {
+    fileprivate func localizedFirstWordCapitalized() -> String { prefix(1).localizedCapitalized + dropFirst() }
 }

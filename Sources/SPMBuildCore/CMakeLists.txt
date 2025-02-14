@@ -18,11 +18,12 @@ add_library(SPMBuildCore
   BuildSystem/BuildSystemCommand.swift
   BuildSystem/BuildSystemDelegate.swift
   BuiltTestProduct.swift
+  Plugins/DefaultPluginScriptRunner.swift
   Plugins/PluginContextSerializer.swift
   Plugins/PluginInvocation.swift
   Plugins/PluginMessages.swift
   Plugins/PluginScriptRunner.swift
-  PrebuildCommandResult.swift
+  CommandPluginResult.swift
   ResolvedPackage+Extensions.swift
   Triple+Extensions.swift
   XCFrameworkMetadata.swift)
@@ -33,6 +34,7 @@ target_link_libraries(SPMBuildCore PUBLIC
   TSCBasic
   TSCUtility
   Basics
+  SwiftCollections::OrderedCollections
   PackageGraph)
 
 

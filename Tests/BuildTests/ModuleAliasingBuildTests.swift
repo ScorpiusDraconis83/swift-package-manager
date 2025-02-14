@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2022 Apple Inc. and the Swift project authors
+// Copyright (c) 2022-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -19,15 +19,14 @@ import Basics
 import PackageLoading
 @testable import PackageModel
 import SPMBuildCore
+import _InternalBuildTestSupport
 import _InternalTestSupport
 import SwiftDriver
 import Workspace
 import XCTest
 
-import class TSCBasic.InMemoryFileSystem
-
 final class ModuleAliasingBuildTests: XCTestCase {
-    func testModuleAliasingEmptyAlias() throws {
+    func testModuleAliasingEmptyAlias() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -77,7 +76,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         }
     }
 
-    func testModuleAliasingInvalidIdentifierAlias() throws {
+    func testModuleAliasingInvalidIdentifierAlias() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -130,7 +129,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         }
     }
 
-    func testModuleAliasingDuplicateProductNames() throws {
+    func testModuleAliasingDuplicateProductNames() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -189,7 +188,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -201,15 +200,15 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(3)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "BarLogging" && $0.target.moduleAliases?["Logging"] == "BarLogging" }
+                .contains { $0.module.name == "BarLogging" && $0.module.moduleAliases?["Logging"] == "BarLogging" }
         )
     }
 
-    func testModuleAliasingDuplicateDylibProductNames() throws {
+    func testModuleAliasingDuplicateDylibProductNames() async throws {
         let fooPkg: AbsolutePath = "/fooPkg"
         let barPkg: AbsolutePath = "/barPkg"
         let fs = InMemoryFileSystem(
@@ -271,7 +270,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         }
     }
 
-    func testModuleAliasingDuplicateDylibStaticLibProductNames() throws {
+    func testModuleAliasingDuplicateDylibStaticLibProductNames() async throws {
         let fooPkg: AbsolutePath = "/fooPkg"
         let barPkg: AbsolutePath = "/barPkg"
         let fs = InMemoryFileSystem(
@@ -333,7 +332,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         }
     }
 
-    func testModuleAliasingDuplicateDylibAutomaticProductNames() throws {
+    func testModuleAliasingDuplicateDylibAutomaticProductNames() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -393,7 +392,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -405,11 +404,11 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(3)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "BarLogging" && $0.target.moduleAliases?["Logging"] == "BarLogging" }
+                .contains { $0.module.name == "BarLogging" && $0.module.moduleAliases?["Logging"] == "BarLogging" }
         )
         #if os(macOS)
         let dylib = try result.buildProduct(for: "Logging")
@@ -420,7 +419,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         #endif
     }
 
-    func testModuleAliasingDuplicateStaticLibAutomaticProductNames() throws {
+    func testModuleAliasingDuplicateStaticLibAutomaticProductNames() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -479,7 +478,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -491,11 +490,11 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(3)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "BazLogging" && $0.target.moduleAliases?["Logging"] == "BazLogging" }
+                .contains { $0.module.name == "BazLogging" && $0.module.moduleAliases?["Logging"] == "BazLogging" }
         )
         #if os(macOS)
         let staticlib = try result.buildProduct(for: "Logging")
@@ -506,7 +505,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         #endif
     }
 
-    func testModuleAliasingDuplicateProductNamesUpstream() throws {
+    func testModuleAliasingDuplicateProductNamesUpstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -607,7 +606,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -619,17 +618,17 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(5)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "ALogging" && $0.target.moduleAliases?["Logging"] == "ALogging" }
+                .contains { $0.module.name == "ALogging" && $0.module.moduleAliases?["Logging"] == "ALogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "A" && $0.target.moduleAliases?["Logging"] == "ALogging" }
+                .contains { $0.module.name == "A" && $0.module.moduleAliases?["Logging"] == "ALogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "B" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "B" && $0.module.moduleAliases == nil })
         #if os(macOS)
         let dylib = try result.buildProduct(for: "Logging")
         XCTAssertTrue(
@@ -639,7 +638,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         #endif
     }
 
-    func testModuleAliasingDirectDeps() throws {
+    func testModuleAliasingDirectDeps() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -705,7 +704,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
 
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -719,15 +718,15 @@ final class ModuleAliasingBuildTests: XCTestCase {
 
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "FooLogging" && $0.target.moduleAliases?["Logging"] == "FooLogging" }
+                .contains { $0.module.name == "FooLogging" && $0.module.moduleAliases?["Logging"] == "FooLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "BarLogging" && $0.target.moduleAliases?["Logging"] == "BarLogging" }
+                .contains { $0.module.name == "BarLogging" && $0.module.moduleAliases?["Logging"] == "BarLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
 
         let fooLoggingArgs = try result.moduleBuildDescription(for: "FooLogging").swift().compileArguments()
@@ -768,7 +767,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         #endif
     }
 
-    func testModuleAliasingDuplicateTargetNameInUpstream() throws {
+    func testModuleAliasingDuplicateTargetNameInUpstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -825,7 +824,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -839,15 +838,15 @@ final class ModuleAliasingBuildTests: XCTestCase {
 
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "OtherLogging" && $0.target.moduleAliases?["Logging"] == "OtherLogging" }
+                .contains { $0.module.name == "OtherLogging" && $0.module.moduleAliases?["Logging"] == "OtherLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Utils" && $0.target.moduleAliases?["Logging"] == "OtherLogging" }
+                .contains { $0.module.name == "Utils" && $0.module.moduleAliases?["Logging"] == "OtherLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
 
         let otherLoggingArgs = try result.moduleBuildDescription(for: "OtherLogging").swift().compileArguments()
@@ -878,7 +877,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         #endif
     }
 
-    func testModuleAliasingMultipleAliasesInProduct() throws {
+    func testModuleAliasingMultipleAliasesInProduct() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -942,7 +941,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         }
     }
 
-    func testModuleAliasingSameNameTargetsWithAliasesInMultiProducts() throws {
+    func testModuleAliasingSameNameTargetsWithAliasesInMultiProducts() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -1001,7 +1000,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -1013,18 +1012,18 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(4)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "MetricsLogging" && $0.target.moduleAliases?["Logging"] == "MetricsLogging"
+                    $0.module.name == "MetricsLogging" && $0.module.moduleAliases?["Logging"] == "MetricsLogging"
                 }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingInvalidSourcesUpstream() throws {
+    func testModuleAliasingInvalidSourcesUpstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -1079,7 +1078,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         }
     }
 
-    func testModuleAliasingInvalidSourcesNestedUpstream() throws {
+    func testModuleAliasingInvalidSourcesNestedUpstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -1150,7 +1149,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         }
     }
 
-    func testModuleAliasingInvalidSourcesInNonAliasedModulesUpstream() throws {
+    func testModuleAliasingInvalidSourcesInNonAliasedModulesUpstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -1202,7 +1201,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         ))
     }
 
-    func testModuleAliasingInvalidSourcesInNonAliasedModulesNestedUpstream() throws {
+    func testModuleAliasingInvalidSourcesInNonAliasedModulesNestedUpstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -1270,7 +1269,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         ))
     }
 
-    func testModuleAliasingDuplicateTargetNameInNestedUpstream() throws {
+    func testModuleAliasingDuplicateTargetNameInNestedUpstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -1332,7 +1331,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -1346,19 +1345,19 @@ final class ModuleAliasingBuildTests: XCTestCase {
 
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Utils" && $0.target.moduleAliases?["Logging"] == "FooLogging" }
+                .contains { $0.module.name == "Utils" && $0.module.moduleAliases?["Logging"] == "FooLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "FooLogging" && $0.target.moduleAliases?["Logging"] == "FooLogging" }
+                .contains { $0.module.name == "FooLogging" && $0.module.moduleAliases?["Logging"] == "FooLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
     }
 
-    func testModuleAliasingOverrideMultipleAliases() throws {
+    func testModuleAliasingOverrideMultipleAliases() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -1439,7 +1438,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -1453,29 +1452,29 @@ final class ModuleAliasingBuildTests: XCTestCase {
 
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "FooLogging" && $0.target.moduleAliases?["Logging"] == "FooLogging" }
+                .contains { $0.module.name == "FooLogging" && $0.module.moduleAliases?["Logging"] == "FooLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "FooMath" && $0.target.moduleAliases?["Math"] == "FooMath" }
+                .contains { $0.module.name == "FooMath" && $0.module.moduleAliases?["Math"] == "FooMath" }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "Utils" && $0.target.moduleAliases?["Logging"] == "FooLogging" && $0.target
+                    $0.module.name == "Utils" && $0.module.moduleAliases?["Logging"] == "FooLogging" && $0.module
                         .moduleAliases?["Math"] == "FooMath"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Math" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "exe" && $0.target.moduleAliases == nil })
-        XCTAssertFalse(result.targetMap.values.contains { $0.target.name == "BarLogging" })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Math" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "exe" && $0.module.moduleAliases == nil })
+        XCTAssertFalse(result.targetMap.values.contains { $0.module.name == "BarLogging" })
     }
 
-    func testModuleAliasingAliasSkipUpstreamTargets() throws {
+    func testModuleAliasingAliasSkipUpstreamTargets() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -1642,7 +1641,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -1654,43 +1653,43 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkProductsCount(1)
         result.checkTargetsCount(11)
 
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "D" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "D" && $0.module.moduleAliases == nil })
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "FooA" && $0.target.moduleAliases?["Foo"] == "FooA" }
+                .contains { $0.module.name == "FooA" && $0.module.moduleAliases?["Foo"] == "FooA" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "C" && $0.target.moduleAliases?["Foo"] == "FooA" }
+                .contains { $0.module.name == "C" && $0.module.moduleAliases?["Foo"] == "FooA" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "B" && $0.target.moduleAliases?["Foo"] == "FooA" }
+                .contains { $0.module.name == "B" && $0.module.moduleAliases?["Foo"] == "FooA" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "A" && $0.target.moduleAliases?["Foo"] == "FooA" }
+                .contains { $0.module.name == "A" && $0.module.moduleAliases?["Foo"] == "FooA" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "FooX" && $0.target.moduleAliases?["Foo"] == "FooX" }
+                .contains { $0.module.name == "FooX" && $0.module.moduleAliases?["Foo"] == "FooX" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Z" && $0.target.moduleAliases?["Foo"] == "FooX" }
+                .contains { $0.module.name == "Z" && $0.module.moduleAliases?["Foo"] == "FooX" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Y" && $0.target.moduleAliases?["Foo"] == "FooX" }
+                .contains { $0.module.name == "Y" && $0.module.moduleAliases?["Foo"] == "FooX" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "X" && $0.target.moduleAliases?["Foo"] == "FooX" }
+                .contains { $0.module.name == "X" && $0.module.moduleAliases?["Foo"] == "FooX" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingAllConflictingAliasesFromMultiProducts() throws {
+    func testModuleAliasingAllConflictingAliasesFromMultiProducts() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/aPkg/Sources/A/main.swift",
@@ -1819,7 +1818,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -1832,19 +1831,19 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(9)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "A" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "A" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "B" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
-                        .moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "B" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
+                        .moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
+                    $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
                         .moduleAliases?
                         .count == 1
                 }
@@ -1852,28 +1851,28 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "C" && $0.target.moduleAliases?["Log"] == "XLog" && $0.target
-                        .moduleAliases?["Utils"] == "YUtils" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "C" && $0.module.moduleAliases?["Log"] == "XLog" && $0.module
+                        .moduleAliases?["Utils"] == "YUtils" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "XLog" && $0.target.moduleAliases?["Log"] == "XLog" && $0.target
-                        .moduleAliases?["Utils"] == "YUtils" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "XLog" && $0.module.moduleAliases?["Log"] == "XLog" && $0.module
+                        .moduleAliases?["Utils"] == "YUtils" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "D" && $0.target.moduleAliases?["Utils"] == "YUtils" && $0.target
-                        .moduleAliases?["Log"] == "ZLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "D" && $0.module.moduleAliases?["Utils"] == "YUtils" && $0.module
+                        .moduleAliases?["Log"] == "ZLog" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "YUtils" && $0.target.moduleAliases?["Utils"] == "YUtils" && $0.target
+                    $0.module.name == "YUtils" && $0.module.moduleAliases?["Utils"] == "YUtils" && $0.module
                         .moduleAliases?
                         .count == 1
                 }
@@ -1881,20 +1880,20 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "ZLog" && $0.target.moduleAliases?["Log"] == "ZLog" && $0.target.moduleAliases?
+                    $0.module.name == "ZLog" && $0.module.moduleAliases?["Log"] == "ZLog" && $0.module.moduleAliases?
                         .count == 1
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "G" && $0.target.moduleAliases?["Utils"] == "YUtils" && $0.target
-                        .moduleAliases?["Log"] == "ZLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "G" && $0.module.moduleAliases?["Utils"] == "YUtils" && $0.module
+                        .moduleAliases?["Log"] == "ZLog" && $0.module.moduleAliases?.count == 2
                 }
         )
     }
 
-    func testModuleAliasingSomeConflictingAliasesInMultiProducts() throws {
+    func testModuleAliasingSomeConflictingAliasesInMultiProducts() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/aPkg/Sources/A/main.swift",
@@ -2034,7 +2033,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -2049,35 +2048,35 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "A" && $0.target.moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?
+                    $0.module.name == "A" && $0.module.moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?
                         .count == 1
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "B" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
-                        .moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "B" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
+                        .moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "C" && $0.target.moduleAliases?["Log"] == "XLog" && $0.target
-                        .moduleAliases?["Utils"] == "XUtils" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "C" && $0.module.moduleAliases?["Log"] == "XLog" && $0.module
+                        .moduleAliases?["Utils"] == "XUtils" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "D" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
-                        .moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "D" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
+                        .moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
+                    $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
                         .moduleAliases?
                         .count == 1
                 }
@@ -2085,28 +2084,28 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "XLog" && $0.target.moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?
+                    $0.module.name == "XLog" && $0.module.moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?
                         .count == 1
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "G" && $0.target.moduleAliases?["Utils"] == "GUtils" && $0.target.moduleAliases?
+                    $0.module.name == "G" && $0.module.moduleAliases?["Utils"] == "GUtils" && $0.module.moduleAliases?
                         .count == 1
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "GUtils" && $0.target.moduleAliases?["Utils"] == "GUtils" && $0.target
+                    $0.module.name == "GUtils" && $0.module.moduleAliases?["Utils"] == "GUtils" && $0.module
                         .moduleAliases?
                         .count == 1
                 }
         )
     }
 
-    func testModuleAliasingMergeAliasesOfSameTargets() throws {
+    func testModuleAliasingMergeAliasesOfSameTargets() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/aPkg/Sources/A/main.swift",
@@ -2253,7 +2252,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -2267,35 +2266,35 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "A" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
-                        .moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "A" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
+                        .moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "B" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
-                        .moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "B" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
+                        .moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "C" && $0.target.moduleAliases?["Log"] == "XLog" && $0.target
-                        .moduleAliases?["Utils"] == "XUtils" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "C" && $0.module.moduleAliases?["Log"] == "XLog" && $0.module
+                        .moduleAliases?["Utils"] == "XUtils" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "D" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
-                        .moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "D" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
+                        .moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
+                    $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
                         .moduleAliases?
                         .count == 1
                 }
@@ -2303,27 +2302,27 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "XLog" && $0.target.moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?
+                    $0.module.name == "XLog" && $0.module.moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?
                         .count == 1
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "G" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
-                        .moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "G" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
+                        .moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?.count == 2
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "H" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
-                        .moduleAliases?["Log"] == "XLog" && $0.target.moduleAliases?.count == 2
+                    $0.module.name == "H" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
+                        .moduleAliases?["Log"] == "XLog" && $0.module.moduleAliases?.count == 2
                 }
         )
     }
 
-    func testModuleAliasingOverrideSameNameTargetAndDepWithAliases() throws {
+    func testModuleAliasingOverrideSameNameTargetAndDepWithAliases() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -2432,7 +2431,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -2447,36 +2446,36 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "Lib" && $0.target.moduleAliases?["Utils"] == "LibUtils" && $0.target
+                    $0.module.name == "Lib" && $0.module.moduleAliases?["Utils"] == "LibUtils" && $0.module
                         .moduleAliases?["Render"] == "LibRender"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "LibRender" && $0.target.moduleAliases?["Render"] == "LibRender" }
+                .contains { $0.module.name == "LibRender" && $0.module.moduleAliases?["Render"] == "LibRender" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "LibUtils" && $0.target.moduleAliases?["Utils"] == "LibUtils" }
+                .contains { $0.module.name == "LibUtils" && $0.module.moduleAliases?["Utils"] == "LibUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "Game" && $0.target.moduleAliases?["Utils"] == "LibUtils" && $0.target
+                    $0.module.name == "Game" && $0.module.moduleAliases?["Utils"] == "LibUtils" && $0.module
                         .moduleAliases?["Render"] == nil
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "DrawRender" && $0.target.moduleAliases?["Render"] == "DrawRender" }
+                .contains { $0.module.name == "DrawRender" && $0.module.moduleAliases?["Render"] == "DrawRender" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Render" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
-        XCTAssertFalse(result.targetMap.values.contains { $0.target.name == "GameUtils" })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Render" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
+        XCTAssertFalse(result.targetMap.values.contains { $0.module.name == "GameUtils" })
     }
 
-    func testModuleAliasingAddOverrideAliasesUpstream() throws {
+    func testModuleAliasingAddOverrideAliasesUpstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -2578,7 +2577,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -2593,28 +2592,28 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "Lib" && $0.target.moduleAliases?["Utils"] == "GameUtils" && $0.target
+                    $0.module.name == "Lib" && $0.module.moduleAliases?["Utils"] == "GameUtils" && $0.module
                         .moduleAliases?["Render"] == "GameRender"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "GameRender" && $0.target.moduleAliases?["Render"] == "GameRender" }
+                .contains { $0.module.name == "GameRender" && $0.module.moduleAliases?["Render"] == "GameRender" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "GameUtils" && $0.target.moduleAliases?["Utils"] == "GameUtils" }
+                .contains { $0.module.name == "GameUtils" && $0.module.moduleAliases?["Utils"] == "GameUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "DrawRender" && $0.target.moduleAliases?["Render"] == "DrawRender" }
+                .contains { $0.module.name == "DrawRender" && $0.module.moduleAliases?["Render"] == "DrawRender" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Render" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Render" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingOverrideUpstreamTargetsWithAliases() throws {
+    func testModuleAliasingOverrideUpstreamTargetsWithAliases() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -2723,7 +2722,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -2738,32 +2737,32 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "Lib" && $0.target.moduleAliases?["Utils"] == "GameUtils" && $0.target
+                    $0.module.name == "Lib" && $0.module.moduleAliases?["Utils"] == "GameUtils" && $0.module
                         .moduleAliases?["Render"] == "GameRender"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "GameRender" && $0.target.moduleAliases?["Render"] == "GameRender" }
+                .contains { $0.module.name == "GameRender" && $0.module.moduleAliases?["Render"] == "GameRender" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "GameUtils" && $0.target.moduleAliases?["Utils"] == "GameUtils" }
+                .contains { $0.module.name == "GameUtils" && $0.module.moduleAliases?["Utils"] == "GameUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Scene" && $0.target.moduleAliases?["Render"] == "DrawRender" }
+                .contains { $0.module.name == "Scene" && $0.module.moduleAliases?["Render"] == "DrawRender" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "DrawRender" && $0.target.moduleAliases?["Render"] == "DrawRender" }
+                .contains { $0.module.name == "DrawRender" && $0.module.moduleAliases?["Render"] == "DrawRender" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Render" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Render" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingOverrideUpstreamTargetsWithAliasesMultipleAliasesInProduct() throws {
+    func testModuleAliasingOverrideUpstreamTargetsWithAliasesMultipleAliasesInProduct() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -2875,7 +2874,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -2890,32 +2889,32 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "Lib" && $0.target.moduleAliases?["Utils"] == "LibUtils" && $0.target
+                    $0.module.name == "Lib" && $0.module.moduleAliases?["Utils"] == "LibUtils" && $0.module
                         .moduleAliases?["Render"] == "LibRender"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "LibRender" && $0.target.moduleAliases?["Render"] == "LibRender" }
+                .contains { $0.module.name == "LibRender" && $0.module.moduleAliases?["Render"] == "LibRender" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "LibUtils" && $0.target.moduleAliases?["Utils"] == "LibUtils" }
+                .contains { $0.module.name == "LibUtils" && $0.module.moduleAliases?["Utils"] == "LibUtils" }
         )
         XCTAssertFalse(
             result.targetMap.values
-                .contains { $0.target.name == "DrawRender" || $0.target.moduleAliases?["Render"] == "DrawRender" }
+                .contains { $0.module.name == "DrawRender" || $0.module.moduleAliases?["Render"] == "DrawRender" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Game" && $0.target.moduleAliases?["Utils"] == "LibUtils" }
+                .contains { $0.module.name == "Game" && $0.module.moduleAliases?["Utils"] == "LibUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Render" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Render" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingOverrideUpstreamTargetsWithAliasesDownstream() throws {
+    func testModuleAliasingOverrideUpstreamTargetsWithAliasesDownstream() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -3029,7 +3028,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -3044,36 +3043,36 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "Lib" && $0.target.moduleAliases?["Utils"] == "LibUtils" && $0.target
+                    $0.module.name == "Lib" && $0.module.moduleAliases?["Utils"] == "LibUtils" && $0.module
                         .moduleAliases?["Render"] == "LibRender"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "LibRender" && $0.target.moduleAliases?["Render"] == "LibRender" }
+                .contains { $0.module.name == "LibRender" && $0.module.moduleAliases?["Render"] == "LibRender" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "LibUtils" && $0.target.moduleAliases?["Utils"] == "LibUtils" }
+                .contains { $0.module.name == "LibUtils" && $0.module.moduleAliases?["Utils"] == "LibUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Game" && $0.target.moduleAliases?["Utils"] == "LibUtils" }
+                .contains { $0.module.name == "Game" && $0.module.moduleAliases?["Utils"] == "LibUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Scene" && $0.target.moduleAliases?["Render"] == "DrawRender" }
+                .contains { $0.module.name == "Scene" && $0.module.moduleAliases?["Render"] == "DrawRender" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "DrawRender" && $0.target.moduleAliases?["Render"] == "DrawRender" }
+                .contains { $0.module.name == "DrawRender" && $0.module.moduleAliases?["Render"] == "DrawRender" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Render" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Render" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingSameTargetFromUpstreamWithoutAlias() throws {
+    func testModuleAliasingSameTargetFromUpstreamWithoutAlias() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -3144,7 +3143,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -3158,23 +3157,23 @@ final class ModuleAliasingBuildTests: XCTestCase {
 
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Utils" && $0.target.moduleAliases?["Logging"] == "FooLogging" }
+                .contains { $0.module.name == "Utils" && $0.module.moduleAliases?["Logging"] == "FooLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "FooLogging" && $0.target.moduleAliases?["Logging"] == "FooLogging" }
+                .contains { $0.module.name == "FooLogging" && $0.module.moduleAliases?["Logging"] == "FooLogging" }
         )
         XCTAssertFalse(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "MyLogging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "MyLogging" && $0.module.moduleAliases == nil }
         )
     }
 
-    func testModuleAliasingDuplicateTargetNamesFromMultiplePkgs() throws {
+    func testModuleAliasingDuplicateTargetNamesFromMultiplePkgs() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/thisPkg/Sources/exe/main.swift",
@@ -3257,7 +3256,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
 
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -3271,27 +3270,27 @@ final class ModuleAliasingBuildTests: XCTestCase {
 
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "FooLogging" && $0.target.moduleAliases?["Logging"] == "FooLogging" }
+                .contains { $0.module.name == "FooLogging" && $0.module.moduleAliases?["Logging"] == "FooLogging" }
         )
         XCTAssertFalse(
             result.targetMap.values
-                .contains { $0.target.name == "Logging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "Logging" && $0.module.moduleAliases == nil }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "CarLogging" && $0.target.moduleAliases?["Logging"] == "CarLogging" }
+                .contains { $0.module.name == "CarLogging" && $0.module.moduleAliases?["Logging"] == "CarLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Utils" && $0.target.moduleAliases?["Logging"] == "FooLogging" }
+                .contains { $0.module.name == "Utils" && $0.module.moduleAliases?["Logging"] == "FooLogging" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "MyLogging" && $0.target.moduleAliases == nil }
+                .contains { $0.module.name == "MyLogging" && $0.module.moduleAliases == nil }
         )
     }
 
-    func testModuleAliasingTargetAndProductTargetWithSameName() throws {
+    func testModuleAliasingTargetAndProductTargetWithSameName() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -3337,7 +3336,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -3349,17 +3348,17 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(4)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "X" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "X" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingProductTargetsWithSameName1() throws {
+    func testModuleAliasingProductTargetsWithSameName1() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -3485,7 +3484,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -3497,29 +3496,29 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(6)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "X" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "X" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "A" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "A" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "B" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "B" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AUtils" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "AUtils" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
-        XCTAssertFalse(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
+        XCTAssertFalse(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingUpstreamProductTargetsWithSameName2() throws {
+    func testModuleAliasingUpstreamProductTargetsWithSameName2() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -3661,7 +3660,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -3671,29 +3670,29 @@ final class ModuleAliasingBuildTests: XCTestCase {
         ))
         result.checkProductsCount(1)
         result.checkTargetsCount(7)
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "X" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "X" && $0.module.moduleAliases == nil })
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "YUtils" && $0.target.moduleAliases?["Utils"] == "YUtils" }
+                .contains { $0.module.name == "YUtils" && $0.module.moduleAliases?["Utils"] == "YUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "A" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "A" && $0.module.moduleAliases == nil })
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AUtils" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "AUtils" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "BUtils" && $0.target.moduleAliases?["Utils"] == "BUtils" }
+                .contains { $0.module.name == "BUtils" && $0.module.moduleAliases?["Utils"] == "BUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
-        XCTAssertFalse(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
+        XCTAssertFalse(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingUpstreamProductTargetsWithSameName3() throws {
+    func testModuleAliasingUpstreamProductTargetsWithSameName3() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -3796,7 +3795,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -3806,24 +3805,24 @@ final class ModuleAliasingBuildTests: XCTestCase {
         ))
         result.checkProductsCount(1)
         result.checkTargetsCount(6)
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "X" && $0.target.moduleAliases == nil })
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "X" && $0.module.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "YUtils" && $0.target.moduleAliases?["Utils"] == "YUtils" }
+                .contains { $0.module.name == "YUtils" && $0.module.moduleAliases?["Utils"] == "YUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "A" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "A" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AUtils" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "AUtils" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingUpstreamProductTargetsWithSameName4() throws {
+    func testModuleAliasingUpstreamProductTargetsWithSameName4() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -3926,7 +3925,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -3936,24 +3935,24 @@ final class ModuleAliasingBuildTests: XCTestCase {
         ))
         result.checkProductsCount(1)
         result.checkTargetsCount(5)
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "X" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "X" && $0.module.moduleAliases == nil })
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "YUtils" && $0.target.moduleAliases?["Utils"] == "YUtils" }
+                .contains { $0.module.name == "YUtils" && $0.module.moduleAliases?["Utils"] == "YUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AUtils" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "AUtils" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
-        XCTAssertFalse(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
+        XCTAssertFalse(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingChainedAliases1() throws {
+    func testModuleAliasingChainedAliases1() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -4069,7 +4068,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -4082,37 +4081,37 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "A" && $0.target.moduleAliases?["Utils"] == "AUtils" && $0.target
+                    $0.module.name == "A" && $0.module.moduleAliases?["Utils"] == "AUtils" && $0.module
                         .moduleAliases?["FooUtils"] == "AFooUtils"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "X" && $0.target.moduleAliases?["Utils"] == "XUtils" && $0.target
+                    $0.module.name == "X" && $0.module.moduleAliases?["Utils"] == "XUtils" && $0.module
                         .moduleAliases?["FooUtils"] == "XFooUtils"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AUtils" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "AUtils" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AFooUtils" && $0.target.moduleAliases?["Utils"] == "AFooUtils" }
+                .contains { $0.module.name == "AFooUtils" && $0.module.moduleAliases?["Utils"] == "AFooUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XFooUtils" && $0.target.moduleAliases?["Utils"] == "XFooUtils" }
+                .contains { $0.module.name == "XFooUtils" && $0.module.moduleAliases?["Utils"] == "XFooUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingChainedAliases2() throws {
+    func testModuleAliasingChainedAliases2() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -4243,7 +4242,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -4256,31 +4255,31 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "A" && $0.target.moduleAliases?["Utils"] == "AUtils" && $0.target
+                    $0.module.name == "A" && $0.module.moduleAliases?["Utils"] == "AUtils" && $0.module
                         .moduleAliases?["FooUtils"] == "AFUtils"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AUtils" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "AUtils" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AFUtils" && $0.target.moduleAliases?["Utils"] == "AFUtils" }
+                .contains { $0.module.name == "AFUtils" && $0.module.moduleAliases?["Utils"] == "AFUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "X" && $0.target.moduleAliases?["FooUtils"] == "XFUtils" }
+                .contains { $0.module.name == "X" && $0.module.moduleAliases?["FooUtils"] == "XFUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XFUtils" && $0.target.moduleAliases?["Utils"] == "XFUtils" }
+                .contains { $0.module.name == "XFUtils" && $0.module.moduleAliases?["Utils"] == "XFUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingChainedAliases3() throws {
+    func testModuleAliasingChainedAliases3() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -4415,7 +4414,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -4428,38 +4427,38 @@ final class ModuleAliasingBuildTests: XCTestCase {
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "A" && $0.target.moduleAliases?["Utils"] == "AUtils" && $0.target
+                    $0.module.name == "A" && $0.module.moduleAliases?["Utils"] == "AUtils" && $0.module
                         .moduleAliases?["FooUtils"] == "AFooUtils"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AUtils" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "AUtils" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AFooUtils" && $0.target.moduleAliases?["Utils"] == "AFooUtils" }
+                .contains { $0.module.name == "AFooUtils" && $0.module.moduleAliases?["Utils"] == "AFooUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
                 .contains {
-                    $0.target.name == "X" && $0.target.moduleAliases?["ZUtils"] == "XUtils" && $0.target
+                    $0.module.name == "X" && $0.module.moduleAliases?["ZUtils"] == "XUtils" && $0.module
                         .moduleAliases?["FooUtils"] == "XFooUtils"
                 }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XFooUtils" && $0.target.moduleAliases?["Utils"] == "XFooUtils" }
+                .contains { $0.module.name == "XFooUtils" && $0.module.moduleAliases?["Utils"] == "XFooUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
-        XCTAssertFalse(result.targetMap.values.contains { $0.target.name == "Utils" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
+        XCTAssertFalse(result.targetMap.values.contains { $0.module.name == "Utils" && $0.module.moduleAliases == nil })
     }
 
-    func testModuleAliasingChainedAliases5() throws {
+    func testModuleAliasingChainedAliases5() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/appPkg/Sources/App/main.swift",
@@ -4584,7 +4583,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -4596,32 +4595,32 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(6)
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "Utils" && $0.target.moduleAliases?["ZUtils"] == "YUtils" }
+                .contains { $0.module.name == "Utils" && $0.module.moduleAliases?["ZUtils"] == "YUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "XUtils" && $0.target.moduleAliases?["Utils"] == "XUtils" }
+                .contains { $0.module.name == "XUtils" && $0.module.moduleAliases?["Utils"] == "XUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "YUtils" && $0.target.moduleAliases?["Utils"] == "YUtils" }
+                .contains { $0.module.name == "YUtils" && $0.module.moduleAliases?["Utils"] == "YUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "WUtils" && $0.target.moduleAliases?["Utils"] == "WUtils" }
+                .contains { $0.module.name == "WUtils" && $0.module.moduleAliases?["Utils"] == "WUtils" }
         )
         XCTAssertTrue(
             result.targetMap.values
-                .contains { $0.target.name == "AUtils" && $0.target.moduleAliases?["Utils"] == "AUtils" }
+                .contains { $0.module.name == "AUtils" && $0.module.moduleAliases?["Utils"] == "AUtils" }
         )
-        XCTAssertTrue(result.targetMap.values.contains { $0.target.name == "App" && $0.target.moduleAliases == nil })
+        XCTAssertTrue(result.targetMap.values.contains { $0.module.name == "App" && $0.module.moduleAliases == nil })
         XCTAssertFalse(
             result.targetMap.values
-                .contains { $0.target.name == "ZUtils" || $0.target.moduleAliases?["Utils"] == "ZUtils" }
+                .contains { $0.module.name == "ZUtils" || $0.module.moduleAliases?["Utils"] == "ZUtils" }
         )
     }
 
-    func testProductAliasingDoesNotBreakPackagesWithOlderToolsVersions() throws {
+    func testProductAliasingDoesNotBreakPackagesWithOlderToolsVersions() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/Lunch/Sources/MyTarget/file.swift",
@@ -4681,7 +4680,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
             observabilityScope: observability.topScope
         )
         XCTAssertNoDiagnostics(observability.diagnostics)
-        let result = try BuildPlanResult(plan: try mockBuildPlan(
+        let result = try await BuildPlanResult(plan: try mockBuildPlan(
             graph: graph,
             linkingParameters: .init(
                 shouldLinkStaticSwiftStdlib: true
@@ -4692,7 +4691,7 @@ final class ModuleAliasingBuildTests: XCTestCase {
         result.checkTargetsCount(3)
     }
 
-    func testProductAliasingWarnsIfPackageWithOlderToolsVersionIsPossibleCauseOfConflict() throws {
+    func testProductAliasingWarnsIfPackageWithOlderToolsVersionIsPossibleCauseOfConflict() async throws {
         let fs = InMemoryFileSystem(
             emptyFiles:
             "/Lunch/Sources/MyTarget/file.swift",

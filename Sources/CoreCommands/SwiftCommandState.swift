@@ -12,6 +12,7 @@
 
 import ArgumentParser
 import Basics
+import _Concurrency
 import Dispatch
 import class Foundation.NSLock
 import class Foundation.ProcessInfo
@@ -39,8 +40,8 @@ import Darwin
 import Glibc
 #elseif canImport(Musl)
 import Musl
-#elseif canImport(Android)
-import Android
+#elseif canImport(Bionic)
+import Bionic
 #endif
 
 import func TSCBasic.exec
@@ -53,7 +54,7 @@ import var TSCBasic.stderrStream
 import class TSCBasic.TerminalController
 import class TSCBasic.ThreadSafeOutputByteStream
 
-import TSCUtility // cannot be scoped because of `String.spm_mangleToC99ExtendedIdentifier()`
+import var TSCUtility.verbosity
 
 typealias Diagnostic = Basics.Diagnostic
 
@@ -79,6 +80,7 @@ public typealias WorkspaceDelegateProvider = (
     _ progressHandler: @escaping (Int64, Int64, String?) -> Void,
     _ inputHandler: @escaping (String, (String?) -> Void) -> Void
 ) -> WorkspaceDelegate
+
 public typealias WorkspaceLoaderProvider = (_ fileSystem: FileSystem, _ observabilityScope: ObservabilityScope)
     -> WorkspaceLoader
 
@@ -237,9 +239,9 @@ public final class SwiftCommandState {
 
     /// Holds the currently active workspace.
     ///
-    /// It is not initialized in init() because for some of the commands like package init , usage etc,
-    /// workspace is not needed, in-fact it would be an error to ask for the workspace object
-    /// for package init because the Manifest file should *not* present.
+    /// It is not initialized in init() because for some of the commands like `package init`, usage etc,
+    /// a workspace is not needed. In fact it would be an error to ask for the workspace object
+    /// for `package init` because the manifest file should *not* be present.
     private var _workspace: Workspace?
     private var _workspaceDelegate: WorkspaceDelegate?
 
@@ -270,6 +272,8 @@ public final class SwiftCommandState {
     private let environment: Environment
 
     private let hostTriple: Basics.Triple?
+
+    package var preferredBuildConfiguration = BuildConfiguration.debug
 
     /// Create an instance of this tool.
     ///
@@ -467,7 +471,8 @@ public final class SwiftCommandState {
                     // TODO: should supportsAvailability be a flag as well?
                     .init(url: $0, supportsAvailability: true)
                 },
-                manifestImportRestrictions: .none
+                manifestImportRestrictions: .none,
+                usePrebuilts: options.caching.usePrebuilts
             ),
             cancellator: self.cancellator,
             initializationWarningHandler: { self.observabilityScope.emit(warning: $0) },
@@ -480,16 +485,13 @@ public final class SwiftCommandState {
         return workspace
     }
 
-    public func getRootPackageInformation() throws -> (dependencies: [PackageIdentity: [PackageIdentity]], targets: [PackageIdentity: [String]]) {
+    public func getRootPackageInformation() async throws -> (dependencies: [PackageIdentity: [PackageIdentity]], targets: [PackageIdentity: [String]]) {
         let workspace = try self.getActiveWorkspace()
         let root = try self.getWorkspaceRoot()
-        let rootManifests = try temp_await {
-            workspace.loadRootManifests(
-                packages: root.packages,
-                observabilityScope: self.observabilityScope,
-                completion: $0
-            )
-        }
+        let rootManifests = try await workspace.loadRootManifests(
+            packages: root.packages,
+            observabilityScope: self.observabilityScope
+        )
 
         var identities = [PackageIdentity: [PackageIdentity]]()
         var targets = [PackageIdentity: [String]]()
@@ -502,6 +504,7 @@ public final class SwiftCommandState {
 
         return (identities, targets)
     }
+
 
     private func getEditsDirectory() throws -> AbsolutePath {
         // TODO: replace multiroot-data-file with explicit overrides
@@ -587,11 +590,11 @@ public final class SwiftCommandState {
     }
 
     /// Resolve the dependencies.
-    public func resolve() throws {
+    public func resolve() async throws {
         let workspace = try getActiveWorkspace()
         let root = try getWorkspaceRoot()
 
-        try workspace.resolve(
+        try await workspace.resolve(
             root: root,
             forceResolution: false,
             forceResolvedVersions: options.resolver.forceResolvedVersions,
@@ -614,8 +617,8 @@ public final class SwiftCommandState {
     public func loadPackageGraph(
         explicitProduct: String? = nil,
         testEntryPointPath: AbsolutePath? = nil
-    ) throws -> ModulesGraph {
-        try self.loadPackageGraph(
+    ) async throws -> ModulesGraph {
+        try await self.loadPackageGraph(
             explicitProduct: explicitProduct,
             traitConfiguration: nil,
             testEntryPointPath: testEntryPointPath
@@ -632,12 +635,12 @@ public final class SwiftCommandState {
         explicitProduct: String? = nil,
         traitConfiguration: TraitConfiguration? = nil,
         testEntryPointPath: AbsolutePath? = nil
-    ) throws -> ModulesGraph {
+    ) async throws -> ModulesGraph {
         do {
             let workspace = try getActiveWorkspace()
 
             // Fetch and load the package graph.
-            let graph = try workspace.loadPackageGraph(
+            let graph = try await workspace.loadPackageGraph(
                 rootInput: getWorkspaceRoot(),
                 explicitProduct: explicitProduct,
                 traitConfiguration: traitConfiguration,
@@ -723,11 +726,11 @@ public final class SwiftCommandState {
         shouldLinkStaticSwiftStdlib: Bool = false,
         productsBuildParameters: BuildParameters? = .none,
         toolsBuildParameters: BuildParameters? = .none,
-        packageGraphLoader: (() throws -> ModulesGraph)? = .none,
+        packageGraphLoader: (() async throws -> ModulesGraph)? = .none,
         outputStream: OutputByteStream? = .none,
         logLevel: Basics.Diagnostic.Severity? = .none,
         observabilityScope: ObservabilityScope? = .none
-    ) throws -> BuildSystem {
+    ) async throws -> BuildSystem {
         guard let buildSystemProvider else {
             fatalError("build system provider not initialized")
         }
@@ -735,7 +738,7 @@ public final class SwiftCommandState {
         var productsParameters = try productsBuildParameters ?? self.productsBuildParameters
         productsParameters.linkingParameters.shouldLinkStaticSwiftStdlib = shouldLinkStaticSwiftStdlib
 
-        let buildSystem = try buildSystemProvider.createBuildSystem(
+        let buildSystem = try await buildSystemProvider.createBuildSystem(
             kind: explicitBuildSystem ?? options.build.buildSystem,
             explicitProduct: explicitProduct,
             traitConfiguration: traitConfiguration,
@@ -761,7 +764,7 @@ public final class SwiftCommandState {
     private func _buildParams(
         toolchain: UserToolchain,
         destination: BuildParameters.Destination,
-        prepareForIndexing: Bool? = nil
+        prepareForIndexing: Bool
     ) throws -> BuildParameters {
         let triple = toolchain.targetTriple
 
@@ -773,10 +776,17 @@ public final class SwiftCommandState {
             observabilityScope.emit(warning: Self.entitlementsMacOSWarning)
         }
 
+        let prepareForIndexingMode: BuildParameters.PrepareForIndexingMode =
+            switch (prepareForIndexing, options.build.prepareForIndexingNoLazy) {
+                case (false, _): .off
+                case (true, false): .on
+                case (true, true): .noLazy
+            }
+
         return try BuildParameters(
             destination: destination,
             dataPath: dataPath,
-            configuration: options.build.configuration,
+            configuration: options.build.configuration ?? self.preferredBuildConfiguration,
             toolchain: toolchain,
             triple: triple,
             flags: options.build.buildFlags,
@@ -786,12 +796,12 @@ public final class SwiftCommandState {
             sanitizers: options.build.enabledSanitizers,
             indexStoreMode: options.build.indexStoreMode.buildParameter,
             isXcodeBuildSystemEnabled: options.build.buildSystem == .xcode,
-            prepareForIndexing: prepareForIndexing ?? options.build.prepareForIndexing,
+            prepareForIndexing: prepareForIndexingMode,
             debuggingParameters: .init(
                 debugInfoFormat: options.build.debugInfoFormat.buildParameter,
                 triple: triple,
                 shouldEnableDebuggingEntitlement:
-                    options.build.getTaskAllowEntitlement ?? (options.build.configuration == .debug),
+                    options.build.getTaskAllowEntitlement ?? (options.build.configuration ?? self.preferredBuildConfiguration == .debug),
                 omitFramePointers: options.build.omitFramePointers
             ),
             driverParameters: .init(
@@ -818,8 +828,6 @@ public final class SwiftCommandState {
                 isVerbose: self.logLevel <= .info
             ),
             testingParameters: .init(
-                configuration: options.build.configuration,
-                targetTriple: triple,
                 forceTestDiscovery: options.build.enableTestDiscovery, // backwards compatibility, remove with --enable-test-discovery
                 testEntryPointPath: options.build.testEntryPointPath
             )
@@ -835,6 +843,7 @@ public final class SwiftCommandState {
 
     private lazy var _toolsBuildParameters: Result<BuildParameters, Swift.Error> = {
         Result(catching: {
+            // Tools need to do a full build
             try _buildParams(toolchain: self.getHostToolchain(), destination: .host, prepareForIndexing: false)
         })
     }()
@@ -847,7 +856,7 @@ public final class SwiftCommandState {
 
     private lazy var _productsBuildParameters: Result<BuildParameters, Swift.Error> = {
         Result(catching: {
-            try _buildParams(toolchain: self.getTargetToolchain(), destination: .target)
+            try _buildParams(toolchain: self.getTargetToolchain(), destination: .target, prepareForIndexing: options.build.prepareForIndexing)
         })
     }()
 
@@ -873,6 +882,7 @@ public final class SwiftCommandState {
             swiftSDK = try SwiftSDK.deriveTargetSwiftSDK(
                 hostSwiftSDK: hostSwiftSDK,
                 hostTriple: hostToolchain.targetTriple,
+                customToolsets: options.locations.toolsetPaths,
                 customCompileDestination: options.locations.customCompileDestination,
                 customCompileTriple: options.build.customCompileTriple,
                 customCompileToolchain: options.build.customCompileToolchain,

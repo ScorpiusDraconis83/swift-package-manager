@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import _Concurrency
 import Dispatch
 import class Foundation.NSLock
 import PackageFingerprint
@@ -69,7 +70,7 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
     private var dependenciesCacheLock = NSLock()
 
     private var knownVersionsCache = ThreadSafeBox<[Version: String]>()
-    private var manifestsCache = ThreadSafeKeyValueStore<String, Manifest>()
+    private var manifestsCache = ThrowingAsyncKeyValueMemoizer<String, Manifest>()
     private var toolsVersionsCache = ThreadSafeKeyValueStore<Version, ToolsVersion>()
 
     /// This is used to remember if tools version of a particular version is
@@ -137,8 +138,8 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
     }
 
     /// The available version list (in reverse order).
-    public func toolsVersionsAppropriateVersionsDescending() throws -> [Version] {
-        let reversedVersions = try self.versionsDescending()
+    public func toolsVersionsAppropriateVersionsDescending() async throws -> [Version] {
+        let reversedVersions = try await self.versionsDescending()
         return reversedVersions.lazy.filter {
             // If we have the result cached, return that.
             if let result = self.validToolsVersionsCache[$0] {
@@ -167,17 +168,13 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
 
         let fingerprint: Fingerprint
         do {
-            fingerprint = try temp_await {
-                fingerprintStorage.get(
-                    package: self.package,
-                    version: version,
-                    kind: .sourceControl,
-                    contentType: .sourceCode,
-                    observabilityScope: self.observabilityScope,
-                    callbackQueue: .sharedConcurrent,
-                    callback: $0
-                )
-            }
+            fingerprint = try fingerprintStorage.get(
+                package: self.package,
+                version: version,
+                kind: .sourceControl,
+                contentType: .sourceCode,
+                observabilityScope: self.observabilityScope
+            )
         } catch PackageFingerprintStorageError.notFound {
             fingerprint = Fingerprint(
                 origin: .sourceControl(sourceControlURL),
@@ -186,16 +183,12 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
             )
             // Write to storage if fingerprint not yet recorded
             do {
-                try temp_await {
-                    fingerprintStorage.put(
-                        package: self.package,
-                        version: version,
-                        fingerprint: fingerprint,
-                        observabilityScope: self.observabilityScope,
-                        callbackQueue: .sharedConcurrent,
-                        callback: $0
-                    )
-                }
+                try fingerprintStorage.put(
+                    package: self.package,
+                    version: version,
+                    fingerprint: fingerprint,
+                    observabilityScope: self.observabilityScope
+                )
             } catch PackageFingerprintStorageError.conflict(_, let existing) {
                 let message = "Revision \(revision.identifier) for \(self.package) version \(version) does not match previously recorded value \(existing.value) from \(String(describing: existing.origin.url?.absoluteString))"
                 switch self.fingerprintCheckingMode {
@@ -248,13 +241,13 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
         }
     }
 
-    public func getDependencies(at version: Version, productFilter: ProductFilter) throws -> [Constraint] {
+    public func getDependencies(at version: Version, productFilter: ProductFilter) async throws -> [Constraint] {
         do {
-            return try self.getCachedDependencies(forIdentifier: version.description, productFilter: productFilter) {
+            return try await self.getCachedDependencies(forIdentifier: version.description, productFilter: productFilter) {
                 guard let tag = try self.knownVersions()[version] else {
                     throw StringError("unknown tag \(version)")
                 }
-                return try self.loadDependencies(tag: tag, version: version, productFilter: productFilter)
+                return try await self.loadDependencies(tag: tag, version: version, productFilter: productFilter)
             }.1
         } catch {
             throw GetDependenciesError(
@@ -266,12 +259,12 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
         }
     }
 
-    public func getDependencies(at revision: String, productFilter: ProductFilter) throws -> [Constraint] {
+    public func getDependencies(at revision: String, productFilter: ProductFilter) async throws -> [Constraint] {
         do {
-            return try self.getCachedDependencies(forIdentifier: revision, productFilter: productFilter) {
+            return try await self.getCachedDependencies(forIdentifier: revision, productFilter: productFilter) {
                 // resolve the revision identifier and return its dependencies.
                 let revision = try repository.resolveRevision(identifier: revision)
-                return try self.loadDependencies(at: revision, productFilter: productFilter)
+                return try await self.loadDependencies(at: revision, productFilter: productFilter)
             }.1
         } catch {
             // Examine the error to see if we can come up with a more informative and actionable error message.  We know that the revision is expected to be a branch name or a hash (tags are handled through a different code path).
@@ -313,12 +306,12 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
     private func getCachedDependencies(
         forIdentifier identifier: String,
         productFilter: ProductFilter,
-        getDependencies: () throws -> (Manifest, [Constraint])
-    ) throws -> (Manifest, [Constraint]) {
+        getDependencies: () async throws -> (Manifest, [Constraint])
+    ) async throws -> (Manifest, [Constraint]) {
         if let result = (self.dependenciesCacheLock.withLock { self.dependenciesCache[identifier, default: [:]][productFilter] }) {
             return result
         }
-        let result = try getDependencies()
+        let result = try await getDependencies()
         self.dependenciesCacheLock.withLock {
             self.dependenciesCache[identifier, default: [:]][productFilter] = result
         }
@@ -330,8 +323,8 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
         tag: String,
         version: Version? = nil,
         productFilter: ProductFilter
-    ) throws -> (Manifest, [Constraint]) {
-        let manifest = try self.loadManifest(tag: tag, version: version)
+    ) async throws -> (Manifest, [Constraint]) {
+        let manifest = try await self.loadManifest(tag: tag, version: version)
         return (manifest, try manifest.dependencyConstraints(productFilter: productFilter))
     }
 
@@ -340,8 +333,8 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
         at revision: Revision,
         version: Version? = nil,
         productFilter: ProductFilter
-    ) throws -> (Manifest, [Constraint]) {
-        let manifest = try self.loadManifest(at: revision, version: version)
+    ) async throws -> (Manifest, [Constraint]) {
+        let manifest = try await self.loadManifest(at: revision, version: version)
         return (manifest, try manifest.dependencyConstraints(productFilter: productFilter))
     }
 
@@ -350,11 +343,11 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
         return []
     }
 
-    public func loadPackageReference(at boundVersion: BoundVersion) throws -> PackageReference {
+    public func loadPackageReference(at boundVersion: BoundVersion) async throws -> PackageReference {
         let revision: Revision
         var version: Version?
         switch boundVersion {
-        case .version(let v, _):
+        case .version(let v):
             guard let tag = try self.knownVersions()[v] else {
                 throw StringError("unknown tag \(v)")
             }
@@ -367,7 +360,7 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
             return self.package
         }
 
-        let manifest = try self.loadManifest(at: revision, version: version)
+        let manifest = try await self.loadManifest(at: revision, version: version)
         return self.package.withName(manifest.displayName)
     }
 
@@ -386,24 +379,24 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
         return (try? self.toolsVersion(for: version)).flatMap(self.isValidToolsVersion(_:)) ?? false
     }
 
-    private func loadManifest(tag: String, version: Version?) throws -> Manifest {
-        try self.manifestsCache.memoize(tag) {
-            let fileSystem = try repository.openFileView(tag: tag)
-            return try self.loadManifest(fileSystem: fileSystem, version: version, revision: tag)
+    private func loadManifest(tag: String, version: Version?) async throws -> Manifest {
+        try await self.manifestsCache.memoize(tag) {
+            let fileSystem = try self.repository.openFileView(tag: tag)
+            return try await self.loadManifest(fileSystem: fileSystem, version: version, revision: tag)
         }
     }
 
-    private func loadManifest(at revision: Revision, version: Version?) throws -> Manifest {
-        try self.manifestsCache.memoize(revision.identifier) {
+    private func loadManifest(at revision: Revision, version: Version?) async throws -> Manifest {
+        try await self.manifestsCache.memoize(revision.identifier) {
             let fileSystem = try self.repository.openFileView(revision: revision)
-            return try self.loadManifest(fileSystem: fileSystem, version: version, revision: revision.identifier)
+            return try await self.loadManifest(fileSystem: fileSystem, version: version, revision: revision.identifier)
         }
     }
 
-    private func loadManifest(fileSystem: FileSystem, version: Version?, revision: String) throws -> Manifest {
+    private func loadManifest(fileSystem: FileSystem, version: Version?, revision: String) async throws -> Manifest {
         // Load the manifest.
         // FIXME: this should not block
-        return try temp_await {
+        return try await withCheckedThrowingContinuation { continuation in
             self.manifestLoader.load(
                 packagePath: .root,
                 packageIdentity: self.package.identity,
@@ -417,7 +410,9 @@ internal final class SourceControlPackageContainer: PackageContainer, CustomStri
                 observabilityScope: self.observabilityScope,
                 delegateQueue: .sharedConcurrent,
                 callbackQueue: .sharedConcurrent,
-                completion: $0
+                completion: {
+                    continuation.resume(with: $0)
+                }
             )
         }
     }

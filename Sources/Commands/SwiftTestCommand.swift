@@ -15,6 +15,8 @@ import ArgumentParser
 @_spi(SwiftPMInternal)
 import Basics
 
+import _Concurrency
+
 @_spi(SwiftPMInternal)
 import CoreCommands
 
@@ -30,12 +32,19 @@ import SPMBuildCore
 import func TSCLibc.exit
 import Workspace
 
+import struct TSCBasic.FileSystemError
 import struct TSCBasic.ByteString
 import enum TSCBasic.JSON
 import class Basics.AsyncProcess
 import var TSCBasic.stdoutStream
 import class TSCBasic.SynchronizedQueue
 import class TSCBasic.Thread
+
+#if os(Windows)
+import WinSDK // for ERROR_NOT_FOUND
+#elseif canImport(Android)
+import Android
+#endif
 
 private enum TestError: Swift.Error {
     case invalidListTestJSONData(context: String, underlyingError: Error? = nil)
@@ -80,6 +89,43 @@ struct SharedOptions: ParsableArguments {
     var testProduct: String?
 }
 
+struct TestEventStreamOptions: ParsableArguments {
+    /// Legacy equivalent of ``configurationPath``.
+    @Option(name: .customLong("experimental-configuration-path"),
+            help: .private)
+    var experimentalConfigurationPath: AbsolutePath?
+
+    /// Path where swift-testing's JSON configuration should be read.
+    @Option(name: .customLong("configuration-path"),
+            help: .hidden)
+    var configurationPath: AbsolutePath?
+
+    /// Legacy equivalent of ``eventStreamOutputPath``.
+    @Option(name: .customLong("experimental-event-stream-output"),
+            help: .private)
+    var experimentalEventStreamOutputPath: AbsolutePath?
+
+    /// Path where swift-testing's JSON output should be written.
+    @Option(name: .customLong("event-stream-output-path"),
+            help: .hidden)
+    var eventStreamOutputPath: AbsolutePath?
+
+    /// Legacy equivalent of ``eventStreamVersion``.
+    @Option(name: .customLong("experimental-event-stream-version"),
+            help: .private)
+    var experimentalEventStreamVersion: Int?
+
+    /// The schema version of swift-testing's JSON input/output.
+    @Option(name: .customLong("event-stream-version"),
+            help: .hidden)
+    var eventStreamVersion: Int?
+
+  /// Experimental path for writing attachments (Swift Testing only.)
+  @Option(name: .customLong("experimental-attachments-path"),
+          help: .private)
+  var experimentalAttachmentsPath: AbsolutePath?
+}
+
 struct TestCommandOptions: ParsableArguments {
     @OptionGroup()
     var globalOptions: GlobalOptions
@@ -90,6 +136,10 @@ struct TestCommandOptions: ParsableArguments {
     /// Which testing libraries to use (and any related options.)
     @OptionGroup()
     var testLibraryOptions: TestLibraryOptions
+
+    /// Options for Swift Testing's event stream.
+    @OptionGroup()
+    var testEventStreamOptions: TestEventStreamOptions
 
     /// If tests should run in parallel mode.
     @Flag(name: .customLong("parallel"),
@@ -138,6 +188,15 @@ struct TestCommandOptions: ParsableArguments {
             help: "Path where the xUnit xml file should be generated.")
     var xUnitOutput: AbsolutePath?
 
+    @Flag(
+        name: .customLong("experimental-xunit-message-failure"),
+        help: ArgumentHelp(
+            "When set, include the content of stdout/stderr in failure messages (XCTest only, experimental).",
+            visibility: .hidden
+        )
+    )
+    var shouldShowDetailedFailureMessage: Bool = false
+
     /// Generate LinuxMain entries and exit.
     @Flag(name: .customLong("testable-imports"), inversion: .prefixedEnableDisable, help: "Enable or disable testable imports. Enabled by default.")
     var enableTestableImports: Bool = true
@@ -155,21 +214,6 @@ struct TestCommandOptions: ParsableArguments {
     var enableExperimentalTestOutput: Bool {
         return testOutput == .experimentalSummary
     }
-
-    /// Path where swift-testing's JSON configuration should be read.
-    @Option(name: .customLong("experimental-configuration-path"),
-            help: .hidden)
-    var configurationPath: AbsolutePath?
-
-    /// Path where swift-testing's JSON output should be written.
-    @Option(name: .customLong("experimental-event-stream-output"),
-            help: .hidden)
-    var eventStreamOutputPath: AbsolutePath?
-
-    /// The schema version of swift-testing's JSON input/output.
-    @Option(name: .customLong("experimental-event-stream-version"),
-            help: .hidden)
-    var eventStreamVersion: Int?
 
     @OptionGroup(visibility: .hidden)
     package var traits: TraitOptions
@@ -222,102 +266,127 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
     @OptionGroup()
     var options: TestCommandOptions
 
-    // MARK: - XCTest
+    private func run(_ swiftCommandState: SwiftCommandState, buildParameters: BuildParameters, testProducts: [BuiltTestProduct]) async throws {
+        // Remove test output from prior runs and validate priors.
+        if self.options.enableExperimentalTestOutput && buildParameters.triple.supportsTestSummary {
+            _ = try? localFileSystem.removeFileTree(buildParameters.testOutputPath)
+        }
 
-    private func xctestRun(_ swiftCommandState: SwiftCommandState) async throws {
-        // validate XCTest available on darwin based systems
-        let toolchain = try swiftCommandState.getTargetToolchain()
-        if case let .unsupported(reason) = try swiftCommandState.getHostToolchain().swiftSDK.xctestSupport {
-            if let reason {
-                throw TestError.xctestNotAvailable(reason: reason)
-            } else {
+        var results = [TestRunner.Result]()
+
+        // Run XCTest.
+        if options.testLibraryOptions.isEnabled(.xctest, swiftCommandState: swiftCommandState) {
+            // Validate XCTest is available on Darwin-based systems. If it's not available and we're hitting this code
+            // path, that means the developer must have explicitly passed --enable-xctest (or the toolchain is
+            // corrupt, I suppose.)
+            let toolchain = try swiftCommandState.getTargetToolchain()
+            if case let .unsupported(reason) = try swiftCommandState.getHostToolchain().swiftSDK.xctestSupport {
+                if let reason {
+                    throw TestError.xctestNotAvailable(reason: reason)
+                } else {
+                    throw TestError.xcodeNotInstalled
+                }
+            } else if toolchain.targetTriple.isDarwin() && toolchain.xctestPath == nil {
                 throw TestError.xcodeNotInstalled
             }
-        } else if toolchain.targetTriple.isDarwin() && toolchain.xctestPath == nil {
-            throw TestError.xcodeNotInstalled
+
+            if !self.options.shouldRunInParallel {
+                let (xctestArgs, testCount) = try xctestArgs(for: testProducts, swiftCommandState: swiftCommandState)
+                let result = try await runTestProducts(
+                    testProducts,
+                    additionalArguments: xctestArgs,
+                    productsBuildParameters: buildParameters,
+                    swiftCommandState: swiftCommandState,
+                    library: .xctest
+                )
+                if result == .success, testCount == 0 {
+                    results.append(.noMatchingTests)
+                } else {
+                    results.append(result)
+                }
+            } else {
+                let testSuites = try TestingSupport.getTestSuites(
+                    in: testProducts,
+                    swiftCommandState: swiftCommandState,
+                    enableCodeCoverage: options.enableCodeCoverage,
+                    shouldSkipBuilding: options.sharedOptions.shouldSkipBuilding,
+                    experimentalTestOutput: options.enableExperimentalTestOutput,
+                    sanitizers: globalOptions.build.sanitizers
+                )
+                let tests = try testSuites
+                    .filteredTests(specifier: options.testCaseSpecifier)
+                    .skippedTests(specifier: options.skippedTests(fileSystem: swiftCommandState.fileSystem))
+
+                let result: TestRunner.Result
+                let testResults: [ParallelTestRunner.TestResult]
+                if tests.isEmpty {
+                    testResults = []
+                    result = .noMatchingTests
+                } else {
+                    // Run the tests using the parallel runner.
+                    let runner = ParallelTestRunner(
+                        bundlePaths: testProducts.map { $0.bundlePath },
+                        cancellator: swiftCommandState.cancellator,
+                        toolchain: toolchain,
+                        numJobs: options.numberOfWorkers ?? ProcessInfo.processInfo.activeProcessorCount,
+                        buildOptions: globalOptions.build,
+                        productsBuildParameters: buildParameters,
+                        shouldOutputSuccess: swiftCommandState.logLevel <= .info,
+                        observabilityScope: swiftCommandState.observabilityScope
+                    )
+
+                    testResults = try runner.run(tests)
+                    result = runner.ranSuccessfully ? .success : .failure
+                }
+
+                try generateXUnitOutputIfRequested(for: testResults, swiftCommandState: swiftCommandState)
+                results.append(result)
+            }
         }
 
-        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options, library: .xctest)
-
-        // Remove test output from prior runs and validate priors.
-        if self.options.enableExperimentalTestOutput && productsBuildParameters.triple.supportsTestSummary {
-            _ = try? localFileSystem.removeFileTree(productsBuildParameters.testOutputPath)
+        // Run Swift Testing (parallel or not, it has a single entry point.)
+        if options.testLibraryOptions.isEnabled(.swiftTesting, swiftCommandState: swiftCommandState) {
+            lazy var testEntryPointPath = testProducts.lazy.compactMap(\.testEntryPointPath).first
+            if options.testLibraryOptions.isExplicitlyEnabled(.swiftTesting, swiftCommandState: swiftCommandState) || testEntryPointPath == nil {
+                results.append(
+                    try await runTestProducts(
+                        testProducts,
+                        additionalArguments: [],
+                        productsBuildParameters: buildParameters,
+                        swiftCommandState: swiftCommandState,
+                        library: .swiftTesting
+                    )
+                )
+            } else if let testEntryPointPath {
+                // Cannot run Swift Testing because an entry point file was used and the developer
+                // didn't explicitly enable Swift Testing.
+                swiftCommandState.observabilityScope.emit(
+                    debug: "Skipping automatic Swift Testing invocation because a test entry point path is present: \(testEntryPointPath)"
+                )
+            }
         }
 
-        let testProducts = try buildTestsIfNeeded(swiftCommandState: swiftCommandState, library: .xctest)
-        if !self.options.shouldRunInParallel {
-            let xctestArgs = try xctestArgs(for: testProducts, swiftCommandState: swiftCommandState)
-            try await runTestProducts(
-                testProducts,
-                additionalArguments: xctestArgs,
-                productsBuildParameters: productsBuildParameters,
-                swiftCommandState: swiftCommandState,
-                library: .xctest
-            )
-        } else {
-            let testSuites = try TestingSupport.getTestSuites(
-                in: testProducts,
-                swiftCommandState: swiftCommandState,
-                enableCodeCoverage: options.enableCodeCoverage,
-                shouldSkipBuilding: options.sharedOptions.shouldSkipBuilding,
-                experimentalTestOutput: options.enableExperimentalTestOutput,
-                sanitizers: globalOptions.build.sanitizers
-            )
-            let tests = try testSuites
-                .filteredTests(specifier: options.testCaseSpecifier)
-                .skippedTests(specifier: options.skippedTests(fileSystem: swiftCommandState.fileSystem))
-
-            // If there were no matches, emit a warning and exit.
-            if tests.isEmpty {
-                swiftCommandState.observabilityScope.emit(.noMatchingTests)
-                try generateXUnitOutputIfRequested(for: [], swiftCommandState: swiftCommandState)
-                return
+        switch results.reduce() {
+        case .success:
+            // Nothing to do here.
+            break
+        case .failure:
+            swiftCommandState.executionStatus = .failure
+            if self.options.enableExperimentalTestOutput {
+                try Self.handleTestOutput(productsBuildParameters: buildParameters, packagePath: testProducts[0].packagePath)
             }
-
-            // Clean out the code coverage directory that may contain stale
-            // profraw files from a previous run of the code coverage tool.
-            if self.options.enableCodeCoverage {
-                try swiftCommandState.fileSystem.removeFileTree(productsBuildParameters.codeCovPath)
-            }
-
-            // Run the tests using the parallel runner.
-            let runner = ParallelTestRunner(
-                bundlePaths: testProducts.map { $0.bundlePath },
-                cancellator: swiftCommandState.cancellator,
-                toolchain: toolchain,
-                numJobs: options.numberOfWorkers ?? ProcessInfo.processInfo.activeProcessorCount,
-                buildOptions: globalOptions.build,
-                productsBuildParameters: productsBuildParameters,
-                shouldOutputSuccess: swiftCommandState.logLevel <= .info,
-                observabilityScope: swiftCommandState.observabilityScope
-            )
-
-            let testResults = try runner.run(tests)
-
-            try generateXUnitOutputIfRequested(for: testResults, swiftCommandState: swiftCommandState)
-
-            // process code Coverage if request
-            if self.options.enableCodeCoverage, runner.ranSuccessfully {
-                try await processCodeCoverage(testProducts, swiftCommandState: swiftCommandState, library: .xctest)
-            }
-
-            if !runner.ranSuccessfully {
-                swiftCommandState.executionStatus = .failure
-            }
-
-            if self.options.enableExperimentalTestOutput, !runner.ranSuccessfully {
-                try Self.handleTestOutput(productsBuildParameters: productsBuildParameters, packagePath: testProducts[0].packagePath)
-            }
+        case .noMatchingTests:
+            swiftCommandState.observabilityScope.emit(.noMatchingTests)
         }
     }
 
-    private func xctestArgs(for testProducts: [BuiltTestProduct], swiftCommandState: SwiftCommandState) throws -> [String] {
+    private func xctestArgs(for testProducts: [BuiltTestProduct], swiftCommandState: SwiftCommandState) throws -> (arguments: [String], testCount: Int?) {
         switch options.testCaseSpecifier {
         case .none:
             if case .skip = options.skippedTests(fileSystem: swiftCommandState.fileSystem) {
                 fallthrough
             } else {
-                return []
+                return ([], nil)
             }
 
         case .regex, .specific, .skip:
@@ -339,12 +408,7 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
                 .filteredTests(specifier: options.testCaseSpecifier)
                 .skippedTests(specifier: options.skippedTests(fileSystem: swiftCommandState.fileSystem))
 
-            // If there were no matches, emit a warning.
-            if tests.isEmpty {
-                swiftCommandState.observabilityScope.emit(.noMatchingTests)
-            }
-
-            return TestRunner.xctestArguments(forTestSpecifiers: tests.map(\.specifier))
+            return (TestRunner.xctestArguments(forTestSpecifiers: tests.map(\.specifier)), tests.count)
         }
     }
 
@@ -361,21 +425,9 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
             fileSystem: swiftCommandState.fileSystem,
             results: testResults
         )
-        try generator.generate(at: xUnitOutput)
-    }
-
-    // MARK: - swift-testing
-
-    private func swiftTestingRun(_ swiftCommandState: SwiftCommandState) async throws {
-        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options, library: .swiftTesting)
-        let testProducts = try buildTestsIfNeeded(swiftCommandState: swiftCommandState, library: .swiftTesting)
-        let additionalArguments = Array(CommandLine.arguments.dropFirst())
-        try await runTestProducts(
-            testProducts,
-            additionalArguments: additionalArguments,
-            productsBuildParameters: productsBuildParameters,
-            swiftCommandState: swiftCommandState,
-            library: .swiftTesting
+        try generator.generate(
+            at: xUnitOutput,
+            detailedFailureMessage: self.options.shouldShowDetailedFailureMessage
         )
     }
 
@@ -384,25 +436,36 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
     public func run(_ swiftCommandState: SwiftCommandState) async throws {
         do {
             // Validate commands arguments
-            try self.validateArguments(observabilityScope: swiftCommandState.observabilityScope)
+            try self.validateArguments(swiftCommandState: swiftCommandState)
         } catch {
             swiftCommandState.observabilityScope.emit(error)
             throw ExitCode.failure
         }
 
         if self.options.shouldPrintCodeCovPath {
-            try printCodeCovPath(swiftCommandState)
+            try await printCodeCovPath(swiftCommandState)
         } else if self.options._deprecated_shouldListTests {
             // backward compatibility 6/2022 for deprecation of flag into a subcommand
             let command = try List.parse()
-            try command.run(swiftCommandState)
+            try await command.run(swiftCommandState)
         } else {
-            if try options.testLibraryOptions.enableSwiftTestingLibrarySupport(swiftCommandState: swiftCommandState) {
-                try await swiftTestingRun(swiftCommandState)
+            let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options)
+            let testProducts = try await buildTestsIfNeeded(swiftCommandState: swiftCommandState)
+
+            // Clean out the code coverage directory that may contain stale
+            // profraw files from a previous run of the code coverage tool.
+            if self.options.enableCodeCoverage {
+                try swiftCommandState.fileSystem.removeFileTree(productsBuildParameters.codeCovPath)
             }
-            if options.testLibraryOptions.enableXCTestSupport {
-                try await xctestRun(swiftCommandState)
+
+            try await run(swiftCommandState, buildParameters: productsBuildParameters, testProducts: testProducts)
+
+            // Process code coverage if requested. We do not process it if the test run failed.
+            // See https://github.com/swiftlang/swift-package-manager/pull/6894 for more info.
+            if self.options.enableCodeCoverage, swiftCommandState.executionStatus != .failure {
+                try await processCodeCoverage(testProducts, swiftCommandState: swiftCommandState)
             }
+
         }
     }
 
@@ -411,12 +474,36 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
         additionalArguments: [String],
         productsBuildParameters: BuildParameters,
         swiftCommandState: SwiftCommandState,
-        library: BuildParameters.Testing.Library
-    ) async throws {
-        // Clean out the code coverage directory that may contain stale
-        // profraw files from a previous run of the code coverage tool.
-        if self.options.enableCodeCoverage {
-            try swiftCommandState.fileSystem.removeFileTree(productsBuildParameters.codeCovPath)
+        library: TestingLibrary
+    ) async throws -> TestRunner.Result {
+        // Pass through all arguments from the command line to Swift Testing.
+        var additionalArguments = additionalArguments
+        if library == .swiftTesting {
+            // Reconstruct the arguments list. If an xUnit path was specified, remove it.
+            var commandLineArguments = [String]()
+            var originalCommandLineArguments = CommandLine.arguments.dropFirst().makeIterator()
+            while let arg = originalCommandLineArguments.next() {
+                if arg == "--xunit-output" {
+                    _ = originalCommandLineArguments.next()
+                } else {
+                    commandLineArguments.append(arg)
+                }
+            }
+            additionalArguments += commandLineArguments
+
+            if var xunitPath = options.xUnitOutput {
+                if options.testLibraryOptions.isEnabled(.xctest, swiftCommandState: swiftCommandState) {
+                    // We are running Swift Testing, XCTest is also running in this session, and an xUnit path
+                    // was specified. Make sure we don't stomp on XCTest's XML output by having Swift Testing
+                    // write to a different path.
+                    var xunitFileName = "\(xunitPath.basenameWithoutExt)-swift-testing"
+                    if let ext = xunitPath.extension {
+                        xunitFileName = "\(xunitFileName).\(ext)"
+                    }
+                    xunitPath = xunitPath.parentDirectory.appending(xunitFileName)
+                }
+                additionalArguments += ["--xunit-output", xunitPath.pathString]
+            }
         }
 
         let toolchain = try swiftCommandState.getTargetToolchain()
@@ -427,8 +514,15 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
             library: library
         )
 
+        let runnerPaths: [AbsolutePath] = switch library {
+        case .xctest:
+            testProducts.map(\.bundlePath)
+        case .swiftTesting:
+            testProducts.map(\.binaryPath)
+        }
+
         let runner = TestRunner(
-            bundlePaths: testProducts.map { library == .xctest ? $0.bundlePath : $0.binaryPath },
+            bundlePaths: runnerPaths,
             additionalArguments: additionalArguments,
             cancellator: swiftCommandState.cancellator,
             toolchain: toolchain,
@@ -438,22 +532,11 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
         )
 
         // Finally, run the tests.
-        let ranSuccessfully = runner.test(outputHandler: {
+        return runner.test(outputHandler: {
             // command's result output goes on stdout
             // ie "swift test" should output to stdout
             print($0, terminator: "")
         })
-        if !ranSuccessfully {
-            swiftCommandState.executionStatus = .failure
-        }
-
-        if self.options.enableCodeCoverage, ranSuccessfully {
-            try await processCodeCoverage(testProducts, swiftCommandState: swiftCommandState, library: library)
-        }
-
-        if self.options.enableExperimentalTestOutput, !ranSuccessfully {
-            try Self.handleTestOutput(productsBuildParameters: productsBuildParameters, packagePath: testProducts[0].packagePath)
-        }
     }
 
     private static func handleTestOutput(productsBuildParameters: BuildParameters, packagePath: AbsolutePath) throws {
@@ -490,8 +573,7 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
     /// Processes the code coverage data and emits a json.
     private func processCodeCoverage(
         _ testProducts: [BuiltTestProduct],
-        swiftCommandState: SwiftCommandState,
-        library: BuildParameters.Testing.Library
+        swiftCommandState: SwiftCommandState
     ) async throws {
         let workspace = try swiftCommandState.getActiveWorkspace()
         let root = try swiftCommandState.getWorkspaceRoot()
@@ -504,23 +586,23 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
         }
 
         // Merge all the profraw files to produce a single profdata file.
-        try mergeCodeCovRawDataFiles(swiftCommandState: swiftCommandState, library: library)
+        try await mergeCodeCovRawDataFiles(swiftCommandState: swiftCommandState)
 
-        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options, library: library)
+        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options)
         for product in testProducts {
             // Export the codecov data as JSON.
             let jsonPath = productsBuildParameters.codeCovAsJSONPath(packageName: rootManifest.displayName)
-            try exportCodeCovAsJSON(to: jsonPath, testBinary: product.binaryPath, swiftCommandState: swiftCommandState, library: library)
+            try await exportCodeCovAsJSON(to: jsonPath, testBinary: product.binaryPath, swiftCommandState: swiftCommandState)
         }
     }
 
     /// Merges all profraw profiles in codecoverage directory into default.profdata file.
-    private func mergeCodeCovRawDataFiles(swiftCommandState: SwiftCommandState, library: BuildParameters.Testing.Library) throws {
+    private func mergeCodeCovRawDataFiles(swiftCommandState: SwiftCommandState) async throws {
         // Get the llvm-prof tool.
         let llvmProf = try swiftCommandState.getTargetToolchain().getLLVMProf()
 
         // Get the profraw files.
-        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options, library: library)
+        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options)
         let codeCovFiles = try swiftCommandState.fileSystem.getDirectoryContents(productsBuildParameters.codeCovPath)
 
         // Construct arguments for invoking the llvm-prof tool.
@@ -533,26 +615,25 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
         }
         args += ["-o", productsBuildParameters.codeCovDataFile.pathString]
 
-        try AsyncProcess.checkNonZeroExit(arguments: args)
+        try await AsyncProcess.checkNonZeroExit(arguments: args)
     }
 
     /// Exports profdata as a JSON file.
     private func exportCodeCovAsJSON(
         to path: AbsolutePath,
         testBinary: AbsolutePath,
-        swiftCommandState: SwiftCommandState,
-        library: BuildParameters.Testing.Library
-    ) throws {
+        swiftCommandState: SwiftCommandState
+    ) async throws {
         // Export using the llvm-cov tool.
         let llvmCov = try swiftCommandState.getTargetToolchain().getLLVMCov()
-        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options, library: library)
+        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(options: self.options)
         let args = [
             llvmCov.pathString,
             "export",
             "-instr-profile=\(productsBuildParameters.codeCovDataFile)",
             testBinary.pathString
         ]
-        let result = try AsyncProcess.popen(arguments: args)
+        let result = try await AsyncProcess.popen(arguments: args)
 
         if result.exitStatus != .terminated(code: 0) {
             let output = try result.utf8Output() + result.utf8stderrOutput()
@@ -565,11 +646,10 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
     ///
     /// - Returns: The paths to the build test products.
     private func buildTestsIfNeeded(
-        swiftCommandState: SwiftCommandState,
-        library: BuildParameters.Testing.Library
-    ) throws -> [BuiltTestProduct] {
-        let (productsBuildParameters, toolsBuildParameters) = try swiftCommandState.buildParametersForTest(options: self.options, library: library)
-        return try Commands.buildTestsIfNeeded(
+        swiftCommandState: SwiftCommandState
+    ) async throws -> [BuiltTestProduct] {
+        let (productsBuildParameters, toolsBuildParameters) = try swiftCommandState.buildParametersForTest(options: self.options)
+        return try await Commands.buildTestsIfNeeded(
             swiftCommandState: swiftCommandState,
             productsBuildParameters: productsBuildParameters,
             toolsBuildParameters: toolsBuildParameters,
@@ -581,7 +661,7 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
     /// Private function that validates the commands arguments
     ///
     /// - Throws: if a command argument is invalid
-    private func validateArguments(observabilityScope: ObservabilityScope) throws {
+    private func validateArguments(swiftCommandState: SwiftCommandState) throws {
         // Validation for --num-workers.
         if let workers = options.numberOfWorkers {
 
@@ -596,13 +676,13 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
                 throw StringError("'--num-workers' must be greater than zero")
             }
 
-            if !options.testLibraryOptions.enableXCTestSupport {
+            guard options.testLibraryOptions.isEnabled(.xctest, swiftCommandState: swiftCommandState) else {
                 throw StringError("'--num-workers' is only supported when testing with XCTest")
             }
         }
 
         if options._deprecated_shouldListTests {
-            observabilityScope.emit(warning: "'--list-tests' option is deprecated; use 'swift test list' instead")
+            swiftCommandState.observabilityScope.emit(warning: "'--list-tests' option is deprecated; use 'swift test list' instead")
         }
     }
 
@@ -610,20 +690,17 @@ public struct SwiftTestCommand: AsyncSwiftCommand {
 }
 
 extension SwiftTestCommand {
-    func printCodeCovPath(_ swiftCommandState: SwiftCommandState) throws {
+    func printCodeCovPath(_ swiftCommandState: SwiftCommandState) async throws {
         let workspace = try swiftCommandState.getActiveWorkspace()
         let root = try swiftCommandState.getWorkspaceRoot()
-        let rootManifests = try temp_await {
-            workspace.loadRootManifests(
-                packages: root.packages,
-                observabilityScope: swiftCommandState.observabilityScope,
-                completion: $0
-            )
-        }
+        let rootManifests = try await workspace.loadRootManifests(
+            packages: root.packages,
+            observabilityScope: swiftCommandState.observabilityScope
+        )
         guard let rootManifest = rootManifests.values.first else {
             throw StringError("invalid manifests at \(root.packages)")
         }
-        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(enableCodeCoverage: true, library: .xctest)
+        let (productsBuildParameters, _) = try swiftCommandState.buildParametersForTest(enableCodeCoverage: true)
         print(productsBuildParameters.codeCovAsJSONPath(packageName: rootManifest.displayName))
      }
  }
@@ -641,7 +718,7 @@ extension SwiftTestCommand {
         }
     }
 
-    struct List: SwiftCommand {
+    struct List: AsyncSwiftCommand {
         static let configuration = CommandConfiguration(
             abstract: "Lists test methods in specifier format"
         )
@@ -656,6 +733,10 @@ extension SwiftTestCommand {
         @OptionGroup()
         var testLibraryOptions: TestLibraryOptions
 
+        /// Options for Swift Testing's event stream.
+        @OptionGroup()
+        var testEventStreamOptions: TestEventStreamOptions
+
         @OptionGroup(visibility: .hidden)
         package var traits: TraitOptions
 
@@ -663,43 +744,29 @@ extension SwiftTestCommand {
         @Flag(name: [.customLong("list-tests"), .customShort("l")], help: .hidden)
         var _deprecated_passthrough: Bool = false
 
-        // MARK: - XCTest
-
-        private func xctestRun(_ swiftCommandState: SwiftCommandState) throws {
-          let (productsBuildParameters, toolsBuildParameters) = try swiftCommandState.buildParametersForTest(
-                enableCodeCoverage: false,
-                shouldSkipBuilding: sharedOptions.shouldSkipBuilding,
-                library: .xctest
-            )
-            let testProducts = try buildTestsIfNeeded(
-                swiftCommandState: swiftCommandState,
-                productsBuildParameters: productsBuildParameters,
-                toolsBuildParameters: toolsBuildParameters
-            )
-            let testSuites = try TestingSupport.getTestSuites(
-                in: testProducts,
-                swiftCommandState: swiftCommandState,
-                enableCodeCoverage: false,
-                shouldSkipBuilding: sharedOptions.shouldSkipBuilding,
-                experimentalTestOutput: false,
-                sanitizers: globalOptions.build.sanitizers
-            )
-
-            // Print the tests.
-            for test in testSuites.allTests {
-                print(test.specifier)
+        func run(_ swiftCommandState: SwiftCommandState) async throws {
+            do {
+                try await self.runCommand(swiftCommandState)
+            } catch let error as FileSystemError {
+                if sharedOptions.shouldSkipBuilding {
+                    throw ErrorWithContext(error, """
+                        Test build artifacts were not found in the build folder.
+                        The `--skip-build` flag was provided; either build the tests first with \
+                        `swift build --build tests` or rerun the `swift test list` command without \
+                        `--skip-build`
+                        """
+                    )
+                }
+                throw error
             }
         }
 
-        // MARK: - swift-testing
-
-        private func swiftTestingRun(_ swiftCommandState: SwiftCommandState) throws {
+        func runCommand(_ swiftCommandState: SwiftCommandState) async throws {
             let (productsBuildParameters, toolsBuildParameters) = try swiftCommandState.buildParametersForTest(
                 enableCodeCoverage: false,
-                shouldSkipBuilding: sharedOptions.shouldSkipBuilding,
-                library: .swiftTesting
+                shouldSkipBuilding: sharedOptions.shouldSkipBuilding
             )
-            let testProducts = try buildTestsIfNeeded(
+            let testProducts = try await buildTestsIfNeeded(
                 swiftCommandState: swiftCommandState,
                 productsBuildParameters: productsBuildParameters,
                 toolsBuildParameters: toolsBuildParameters
@@ -713,36 +780,59 @@ extension SwiftTestCommand {
                 library: .swiftTesting
             )
 
-            let additionalArguments = ["--list-tests"] + CommandLine.arguments.dropFirst()
-            let runner = TestRunner(
-                bundlePaths: testProducts.map(\.binaryPath),
-                additionalArguments: additionalArguments,
-                cancellator: swiftCommandState.cancellator,
-                toolchain: toolchain,
-                testEnv: testEnv,
-                observabilityScope: swiftCommandState.observabilityScope,
-                library: .swiftTesting
-            )
+            if testLibraryOptions.isEnabled(.xctest, swiftCommandState: swiftCommandState) {
+                let testSuites = try TestingSupport.getTestSuites(
+                    in: testProducts,
+                    swiftCommandState: swiftCommandState,
+                    enableCodeCoverage: false,
+                    shouldSkipBuilding: sharedOptions.shouldSkipBuilding,
+                    experimentalTestOutput: false,
+                    sanitizers: globalOptions.build.sanitizers
+                )
 
-            // Finally, run the tests.
-            let ranSuccessfully = runner.test(outputHandler: {
-                // command's result output goes on stdout
-                // ie "swift test" should output to stdout
-                print($0, terminator: "")
-            })
-            if !ranSuccessfully {
-                swiftCommandState.executionStatus = .failure
+                // Print the tests.
+                for test in testSuites.allTests {
+                    print(test.specifier)
+                }
             }
-        }
 
-        // MARK: - Common implementation
+            if testLibraryOptions.isEnabled(.swiftTesting, swiftCommandState: swiftCommandState) {
+                lazy var testEntryPointPath = testProducts.lazy.compactMap(\.testEntryPointPath).first
+                if testLibraryOptions.isExplicitlyEnabled(.swiftTesting, swiftCommandState: swiftCommandState) || testEntryPointPath == nil {
+                    let additionalArguments = ["--list-tests"] + CommandLine.arguments.dropFirst()
+                    let runner = TestRunner(
+                        bundlePaths: testProducts.map(\.binaryPath),
+                        additionalArguments: additionalArguments,
+                        cancellator: swiftCommandState.cancellator,
+                        toolchain: toolchain,
+                        testEnv: testEnv,
+                        observabilityScope: swiftCommandState.observabilityScope,
+                        library: .swiftTesting
+                    )
 
-        func run(_ swiftCommandState: SwiftCommandState) throws {
-            if try testLibraryOptions.enableSwiftTestingLibrarySupport(swiftCommandState: swiftCommandState) {
-                try swiftTestingRun(swiftCommandState)
-            }
-            if testLibraryOptions.enableXCTestSupport {
-                try xctestRun(swiftCommandState)
+                    // Finally, run the tests.
+                    let result = runner.test(outputHandler: {
+                        // command's result output goes on stdout
+                        // ie "swift test" should output to stdout
+                        print($0, terminator: "")
+                    })
+                    if result == .failure {
+                        swiftCommandState.executionStatus = .failure
+                        // If the runner reports failure do a check to ensure
+                        // all the binaries are present on the file system.
+                        for path in testProducts.map(\.binaryPath) {
+                            if !swiftCommandState.fileSystem.exists(path) {
+                                throw FileSystemError(.noEntry, path)
+                            }
+                        }
+                    }
+                } else if let testEntryPointPath {
+                    // Cannot run Swift Testing because an entry point file was used and the developer
+                    // didn't explicitly enable Swift Testing.
+                    swiftCommandState.observabilityScope.emit(
+                        debug: "Skipping automatic Swift Testing invocation (list) because a test entry point path is present: \(testEntryPointPath)"
+                    )
+                }
             }
         }
 
@@ -750,8 +840,8 @@ extension SwiftTestCommand {
             swiftCommandState: SwiftCommandState,
             productsBuildParameters: BuildParameters,
             toolsBuildParameters: BuildParameters
-        ) throws -> [BuiltTestProduct] {
-            return try Commands.buildTestsIfNeeded(
+        ) async throws -> [BuiltTestProduct] {
+            return try await Commands.buildTestsIfNeeded(
                 swiftCommandState: swiftCommandState,
                 productsBuildParameters: productsBuildParameters,
                 toolsBuildParameters: toolsBuildParameters,
@@ -801,7 +891,7 @@ final class TestRunner {
     private let observabilityScope: ObservabilityScope
 
     /// Which testing library to use with this test run.
-    private let library: BuildParameters.Testing.Library
+    private let library: TestingLibrary
 
     /// Get the arguments used on this platform to pass test specifiers to XCTest.
     static func xctestArguments<S>(forTestSpecifiers testSpecifiers: S) -> [String] where S: Collection, S.Element == String {
@@ -831,7 +921,7 @@ final class TestRunner {
         toolchain: UserToolchain,
         testEnv: Environment,
         observabilityScope: ObservabilityScope,
-        library: BuildParameters.Testing.Library
+        library: TestingLibrary
     ) {
         self.bundlePaths = bundlePaths
         self.additionalArguments = additionalArguments
@@ -842,39 +932,70 @@ final class TestRunner {
         self.library = library
     }
 
+    /// The result of running the test(s).
+    enum Result: Equatable {
+        /// The test(s) ran successfully.
+        case success
+
+        /// The test(s) failed.
+        case failure
+
+        /// There were no matching tests to run.
+        ///
+        /// XCTest does not report this result. It is used by Swift Testing only.
+        case noMatchingTests
+    }
+
     /// Executes and returns execution status. Prints test output on standard streams if requested
-    /// - Returns: Boolean indicating if test execution returned code 0, and the output stream result
-    public func test(outputHandler: @escaping (String) -> Void) -> Bool {
-        var success = true
+    /// - Returns: Result of spawning and running the test process, and the output stream result
+    func test(outputHandler: @escaping (String) -> Void) -> Result {
+        var results = [Result]()
         for path in self.bundlePaths {
             let testSuccess = self.test(at: path, outputHandler: outputHandler)
-            success = success && testSuccess
+            results.append(testSuccess)
         }
-        return success
+        return results.reduce()
     }
 
     /// Constructs arguments to execute XCTest.
     private func args(forTestAt testPath: AbsolutePath) throws -> [String] {
         var args: [String] = []
-        #if os(macOS)
-        if library == .xctest {
-            guard let xctestPath = self.toolchain.xctestPath else {
-                throw TestError.xcodeNotInstalled
-            }
-            args = [xctestPath.pathString]
-            args += additionalArguments
-            args += [testPath.pathString]
-            return args
-        }
-        #endif
 
-        args += [testPath.description]
-        args += additionalArguments
+        if let runner = self.toolchain.swiftSDK.toolset.knownTools[.testRunner], let runnerPath = runner.path {
+            args.append(runnerPath.pathString)
+            args.append(contentsOf: runner.extraCLIOptions)
+            args.append(testPath.relative(to: localFileSystem.currentWorkingDirectory!).pathString)
+            args.append(contentsOf: self.additionalArguments)
+        } else {
+#if os(macOS)
+            switch library {
+            case .xctest:
+                guard let xctestPath = self.toolchain.xctestPath else {
+                    throw TestError.xcodeNotInstalled
+                }
+                args += [xctestPath.pathString]
+            case .swiftTesting:
+                let helper = try self.toolchain.getSwiftTestingHelper()
+                args += [helper.pathString, "--test-bundle-path", testPath.pathString]
+            }
+            args += self.additionalArguments
+            args += [testPath.pathString]
+    #else
+            args += [testPath.pathString]
+            args += self.additionalArguments
+    #endif
+        }
+
+        if library == .swiftTesting {
+            // HACK: tell the test bundle/executable that we want to run Swift Testing, not XCTest.
+            // XCTest doesn't understand this argument (yet), so don't pass it there.
+            args += ["--testing-library", "swift-testing"]
+        }
 
         return args
     }
 
-    private func test(at path: AbsolutePath, outputHandler: @escaping (String) -> Void) -> Bool {
+    private func test(at path: AbsolutePath, outputHandler: @escaping (String) -> Void) -> Result {
         let testObservabilityScope = self.observabilityScope.makeChildScope(description: "running test at \(path)")
 
         do {
@@ -889,25 +1010,40 @@ final class TestRunner {
             )
             let process = AsyncProcess(arguments: try args(forTestAt: path), environment: self.testEnv, outputRedirection: outputRedirection)
             guard let terminationKey = self.cancellator.register(process) else {
-                return false // terminating
+                return .failure // terminating
             }
             defer { self.cancellator.deregister(terminationKey) }
             try process.launch()
             let result = try process.waitUntilExit()
             switch result.exitStatus {
             case .terminated(code: 0):
-                return true
+                return .success
+            case .terminated(code: EXIT_NO_TESTS_FOUND) where library == .swiftTesting:
+                return .noMatchingTests
             #if !os(Windows)
             case .signalled(let signal) where ![SIGINT, SIGKILL, SIGTERM].contains(signal):
                 testObservabilityScope.emit(error: "Exited with unexpected signal code \(signal)")
-                return false
+                return .failure
             #endif
             default:
-                return false
+                return .failure
             }
         } catch {
             testObservabilityScope.emit(error)
-            return false
+            return .failure
+        }
+    }
+}
+
+extension Collection where Element == TestRunner.Result {
+    /// Reduce all results in this collection into a single result.
+    func reduce() -> Element {
+        if contains(.failure) {
+            return .failure
+        } else if isEmpty || contains(.success) {
+            return .success
+        } else {
+            return .noMatchingTests
         }
     }
 }
@@ -1043,20 +1179,20 @@ final class ParallelTestRunner {
                         toolchain: self.toolchain,
                         testEnv: testEnv,
                         observabilityScope: self.observabilityScope,
-                        library: .xctest
+                        library: .xctest // swift-testing does not use ParallelTestRunner
                     )
                     var output = ""
                     let outputLock = NSLock()
                     let start = DispatchTime.now()
-                    let success = testRunner.test(outputHandler: { _output in outputLock.withLock{ output += _output }})
+                    let result = testRunner.test(outputHandler: { _output in outputLock.withLock{ output += _output }})
                     let duration = start.distance(to: .now())
-                    if !success {
+                    if result == .failure {
                         self.ranSuccessfully = false
                     }
                     self.finishedTests.enqueue(TestResult(
                         unitTest: test,
                         output: output,
-                        success: success,
+                        success: result != .failure,
                         duration: duration
                     ))
                 }
@@ -1255,7 +1391,7 @@ final class XUnitGenerator {
     }
 
     /// Generate the file at the given path.
-    func generate(at path: AbsolutePath) throws {
+    func generate(at path: AbsolutePath, detailedFailureMessage: Bool) throws {
         var content =
             """
             <?xml version="1.0" encoding="UTF-8"?>
@@ -1288,7 +1424,8 @@ final class XUnitGenerator {
                 """
 
             if !result.success {
-                content += "<failure message=\"failed\"></failure>\n"
+                let failureMessage = detailedFailureMessage ? result.output.map(_escapeForXML).joined() : "failure"
+                content += "<failure message=\"\(failureMessage)\"></failure>\n"
             }
 
             content += "</testcase>\n"
@@ -1305,23 +1442,42 @@ final class XUnitGenerator {
     }
 }
 
+/// Escape a single Unicode character for use in an XML-encoded string.
+///
+/// - Parameters:
+///   - character: The character to escape.
+///
+/// - Returns: `character`, or a string containing its escaped form.
+private func _escapeForXML(_ character: Character) -> String {
+    switch character {
+    case "\"":
+        "&quot;"
+    case "<":
+        "&lt;"
+    case ">":
+        "&gt;"
+    case "&":
+        "&amp;"
+    case _ where !character.isASCII || character.isNewline:
+    character.unicodeScalars.lazy
+        .map(\.value)
+        .map { "&#\($0);" }
+        .joined()
+    default:
+    String(character)
+    }
+}
+
 extension SwiftCommandState {
     func buildParametersForTest(
-        options: TestCommandOptions,
-        library: BuildParameters.Testing.Library
+        options: TestCommandOptions
     ) throws -> (productsBuildParameters: BuildParameters, toolsBuildParameters: BuildParameters) {
-        var result = try self.buildParametersForTest(
+        try self.buildParametersForTest(
             enableCodeCoverage: options.enableCodeCoverage,
             enableTestability: options.enableTestableImports,
             shouldSkipBuilding: options.sharedOptions.shouldSkipBuilding,
-            experimentalTestOutput: options.enableExperimentalTestOutput,
-            library: library
+            experimentalTestOutput: options.enableExperimentalTestOutput
         )
-        if try options.testLibraryOptions.enableSwiftTestingLibrarySupport(swiftCommandState: self) {
-            result.productsBuildParameters.flags.swiftCompilerFlags += ["-DSWIFT_PM_SUPPORTS_SWIFT_TESTING"]
-            result.toolsBuildParameters.flags.swiftCompilerFlags += ["-DSWIFT_PM_SUPPORTS_SWIFT_TESTING"]
-        }
-        return result
     }
 }
 
@@ -1374,6 +1530,24 @@ private extension Basics.Diagnostic {
     }
 }
 
+/// The exit code returned to Swift Package Manager by Swift Testing when no
+/// tests matched the inputs specified by the developer (or, for the case of
+/// `swift test list`, when no tests were found.)
+///
+/// Because Swift Package Manager does not directly link to the testing library,
+/// it duplicates the definition of this constant in its own source. Any changes
+/// to this constant in either package must be mirrored in the other.
+private var EXIT_NO_TESTS_FOUND: CInt {
+#if os(macOS) || os(Linux) || canImport(Android)
+    EX_UNAVAILABLE
+#elseif os(Windows)
+    ERROR_NOT_FOUND
+#else
+#warning("Platform-specific implementation missing: value for EXIT_NO_TESTS_FOUND unavailable")
+    return 2 // We're assuming that EXIT_SUCCESS = 0 and EXIT_FAILURE = 1.
+#endif
+}
+
 /// Builds the "test" target if enabled in options.
 ///
 /// - Returns: The paths to the build test products.
@@ -1383,8 +1557,8 @@ private func buildTestsIfNeeded(
     toolsBuildParameters: BuildParameters,
     testProduct: String?,
     traitConfiguration: TraitConfiguration
-) throws -> [BuiltTestProduct] {
-    let buildSystem = try swiftCommandState.createBuildSystem(
+) async throws -> [BuiltTestProduct] {
+    let buildSystem = try await swiftCommandState.createBuildSystem(
         traitConfiguration: traitConfiguration,
         productsBuildParameters: productsBuildParameters,
         toolsBuildParameters: toolsBuildParameters
@@ -1396,10 +1570,10 @@ private func buildTestsIfNeeded(
         .allIncludingTests
     }
 
-    try buildSystem.build(subset: subset)
+    try await buildSystem.build(subset: subset)
 
     // Find the test product.
-    let testProducts = buildSystem.builtTestProducts
+    let testProducts = await buildSystem.builtTestProducts
     guard !testProducts.isEmpty else {
         if let testProduct {
             throw TestError.productIsNotTest(productName: testProduct)

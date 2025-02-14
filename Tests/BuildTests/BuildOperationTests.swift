@@ -23,7 +23,6 @@ import _InternalTestSupport
 import XCTest
 
 import class TSCBasic.BufferedOutputByteStream
-import class TSCBasic.InMemoryFileSystem
 
 private func mockBuildOperation(
     productsBuildParameters: BuildParameters,
@@ -42,8 +41,6 @@ private func mockBuildOperation(
         scratchDirectory: scratchDirectory,
         additionalFileRules: [],
         pkgConfigDirectories: [],
-        dependenciesByRootPackageIdentity: [:],
-        targetsByRootPackageIdentity: [:],
         outputStream: BufferedOutputByteStream(),
         logLevel: .info,
         fileSystem: fs,
@@ -52,51 +49,7 @@ private func mockBuildOperation(
 }
 
 final class BuildOperationTests: XCTestCase {
-    func testDetectUnexpressedDependencies() throws {
-        let scratchDirectory = AbsolutePath("/path/to/build")
-        let triple = hostTriple
-        let targetBuildParameters = mockBuildParameters(
-            destination: .target,
-            buildPath: scratchDirectory.appending(triple.tripleString),
-            shouldDisableLocalRpath: false,
-            triple: triple
-        )
-
-        let fs = InMemoryFileSystem(files: [
-            "\(targetBuildParameters.dataPath)/debug/Lunch.build/Lunch.d" : "/Best.framework"
-        ])
-
-        let observability = ObservabilitySystem.makeForTesting()
-        let buildOp = mockBuildOperation(
-            productsBuildParameters: targetBuildParameters,
-            toolsBuildParameters: mockBuildParameters(destination: .host, shouldDisableLocalRpath: false),
-            scratchDirectory: scratchDirectory,
-            fs: fs, observabilityScope: observability.topScope
-        )
-        buildOp.detectUnexpressedDependencies(
-            availableLibraries: [
-                .init(
-                    location: "/foo",
-                    metadata: .init(
-                        identities: [
-                            .sourceControl(url: .init("https://example.com/org/foo"))
-                        ],
-                        version: "1.0.0",
-                        productName: "Best",
-                        schemaVersion: 1
-                    )
-                )
-            ],
-            targetDependencyMap: ["Lunch": []]
-        )
-
-        XCTAssertEqual(
-            observability.diagnostics.map { $0.message },
-            ["target 'Lunch' has an unexpressed depedency on 'foo'"]
-        )
-    }
-
-    func testDetectProductTripleChange() throws {
+    func testDetectProductTripleChange() async throws {
         let observability = ObservabilitySystem.makeForTesting()
         let fs = InMemoryFileSystem(
             emptyFiles: "/Pkg/Sources/ATarget/foo.swift"
@@ -114,7 +67,7 @@ final class BuildOperationTests: XCTestCase {
             ],
             observabilityScope: observability.topScope
         )
-        try withTemporaryDirectory { tmpDir in
+        try await withTemporaryDirectory { tmpDir in
             let scratchDirectory = tmpDir.appending(".build")
             let fs = localFileSystem
             let triples = try [Triple("x86_64-unknown-linux-gnu"), Triple("wasm32-unknown-wasi")]
@@ -137,7 +90,7 @@ final class BuildOperationTests: XCTestCase {
                     fs: fs, observabilityScope: observability.topScope
                 )
                 // Generate initial llbuild manifest
-                let _ = try buildOp.getBuildDescription()
+                let _ = try await buildOp.getBuildDescription()
                 // Record the initial llbuild manifest as expected one
                 llbuildManifestByTriple[triple.tripleString] = try fs.readFileContents(targetBuildParameters.llbuildManifest)
             }
@@ -170,7 +123,7 @@ final class BuildOperationTests: XCTestCase {
                         fs: fs, observabilityScope: observability.topScope
                     )
                     // Generate llbuild manifest
-                    let _ = try buildOp.getBuildDescription()
+                    let _ = try await buildOp.getBuildDescription()
 
                     // Ensure that llbuild manifest is updated to the expected one
                     let actualManifest: String = try fs.readFileContents(targetBuildParameters.llbuildManifest)
@@ -181,29 +134,57 @@ final class BuildOperationTests: XCTestCase {
         }
     }
 
-    func testHostProductsAndTargetsWithoutExplicitDestination() throws {
+    func testHostProductsAndTargetsWithoutExplicitDestination() async throws {
         let mock  = try macrosTestsPackageGraph()
 
+        let hostParameters = mockBuildParameters(destination: .host)
+        let targetParameters = mockBuildParameters(destination: .target)
         let op = mockBuildOperation(
-            productsBuildParameters: mockBuildParameters(destination: .target),
-            toolsBuildParameters: mockBuildParameters(destination: .host),
+            productsBuildParameters: targetParameters,
+            toolsBuildParameters: hostParameters,
             packageGraphLoader: { mock.graph },
             scratchDirectory: AbsolutePath("/.build/\(hostTriple)"),
             fs: mock.fileSystem,
             observabilityScope: mock.observabilityScope
         )
 
+        let mmioMacrosProductName = try await op.computeLLBuildTargetName(for: .product("MMIOMacros"))
         XCTAssertEqual(
             "MMIOMacros-\(hostTriple)-debug-tool.exe",
-            try op.computeLLBuildTargetName(for: .product("MMIOMacros"))
+            mmioMacrosProductName
+        )
+
+        let mmioTestsProductName = try await op.computeLLBuildTargetName(
+            for: .product("swift-mmioPackageTests")
+        )
+        XCTAssertEqual(
+            "swift-mmioPackageTests-\(hostTriple)-debug-tool.test",
+            mmioTestsProductName
+        )
+
+        let swiftSyntaxTestsProductName = try await op.computeLLBuildTargetName(
+            for: .product("swift-syntaxPackageTests")
+        )
+        XCTAssertEqual(
+            "swift-syntaxPackageTests-\(targetParameters.triple)-debug.test",
+            swiftSyntaxTestsProductName
         )
 
         for target in ["MMIOMacros", "MMIOPlugin", "MMIOMacrosTests", "MMIOMacro+PluginTests"] {
+            let targetName = try await op.computeLLBuildTargetName(for: .target(target))
             XCTAssertEqual(
                 "\(target)-\(hostTriple)-debug-tool.module",
-                try op.computeLLBuildTargetName(for: .target(target))
+                targetName
             )
         }
+
+        let swiftSyntaxTestsTarget = try await op.computeLLBuildTargetName(
+            for: .target("SwiftSyntaxTests")
+        )
+        XCTAssertEqual(
+            "SwiftSyntaxTests-\(targetParameters.triple)-debug.module",
+            swiftSyntaxTestsTarget
+        )
 
         let dependencies = try BuildSubset.target("MMIOMacro+PluginTests").recursiveDependencies(
             for: mock.graph,
@@ -212,9 +193,5 @@ final class BuildOperationTests: XCTestCase {
 
         XCTAssertNotNil(dependencies)
         XCTAssertTrue(dependencies!.count > 0)
-
-        for dependency in dependencies! {
-            XCTAssertEqual(dependency.buildTriple, .tools)
-        }
     }
 }

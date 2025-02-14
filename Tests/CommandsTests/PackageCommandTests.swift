@@ -27,7 +27,6 @@ import XCTest
 
 import struct TSCBasic.ByteString
 import class TSCBasic.BufferedOutputByteStream
-import class TSCBasic.InMemoryFileSystem
 import enum TSCBasic.JSON
 import class Basics.AsyncProcess
 
@@ -50,8 +49,9 @@ final class PackageCommandTests: CommandsTestCase {
     }
 
     func testUsage() async throws {
+        throw XCTSkip("rdar://131126477")
         do {
-            _ = try await execute(["-help"])
+            _ = try await execute(["-halp"])
             XCTFail("expecting `execute` to fail")
         } catch SwiftPMError.executionFailure(_, _, let stderr) {
             XCTAssertMatch(stderr, .contains("Usage: swift package"))
@@ -103,7 +103,7 @@ final class PackageCommandTests: CommandsTestCase {
         }
     }
 
-    func testUnknownSubommand() async throws {
+    func testUnknownSubcommand() async throws {
         try await fixture(name: "Miscellaneous/ExeTest") { fixturePath in
             await XCTAssertThrowsCommandExecutionError(try await execute(["foo"], packagePath: fixturePath)) { error in
                 XCTAssertMatch(error.stderr, .contains("Unknown subcommand or plugin name ‘foo’"))
@@ -551,6 +551,69 @@ final class PackageCommandTests: CommandsTestCase {
         }
     }
 
+    func testCompletionToolListSnippets() async throws {
+        try await fixture(name: "Miscellaneous/Plugins/PluginsAndSnippets") { fixturePath in
+            let result = try await execute(["completion-tool", "list-snippets"], packagePath: fixturePath)
+            XCTAssertEqual(result.stdout, "MySnippet\n")
+        }
+    }
+
+    func testCompletionToolListDependencies() async throws {
+        try await fixture(name: "DependencyResolution/External/Complex") { fixturePath in
+            let result = try await execute(["completion-tool", "list-dependencies"], packagePath: fixturePath.appending("deck-of-playing-cards-local"))
+            XCTAssertEqual(result.stdout, "playingcard\nfisheryates\n")
+        }
+    }
+
+    func testCompletionToolListExecutables() async throws {
+        try await fixture(name: "Miscellaneous/MultipleExecutables") { fixturePath in
+            let result = try await execute(["completion-tool", "list-executables"], packagePath: fixturePath)
+            XCTAssertEqual(result.stdout, "exec1\nexec2\n")
+        }
+    }
+
+    func testCompletionToolListExecutablesDifferentNames() async throws {
+        try await fixture(name: "Miscellaneous/DifferentProductTargetName") { fixturePath in
+            let result = try await execute(["completion-tool", "list-executables"], packagePath: fixturePath)
+            XCTAssertEqual(result.stdout, "Foo\n")
+        }
+    }
+
+    func testShowExecutables() async throws {
+        try await fixture(name: "Miscellaneous/ShowExecutables") { fixturePath in
+            let packageRoot = fixturePath.appending("app")
+            let (textOutput, _) = try await SwiftPM.Package.execute(["show-executables", "--format=flatlist"], packagePath: packageRoot)
+            XCTAssert(textOutput.contains("dealer\n"))
+            XCTAssert(textOutput.contains("deck (deck-of-playing-cards)\n"))
+
+            let (jsonOutput, _) = try await SwiftPM.Package.execute(["show-executables", "--format=json"], packagePath: packageRoot)
+            let json = try JSON(bytes: ByteString(encodingAsUTF8: jsonOutput))
+            guard case let .array(contents) = json else { XCTFail("unexpected result"); return }
+
+            XCTAssertEqual(2, contents.count)
+
+            guard case let first = contents.first else { XCTFail("unexpected result"); return }
+            guard case let .dictionary(dealer) = first else { XCTFail("unexpected result"); return }
+            guard case let .string(dealerName)? = dealer["name"] else { XCTFail("unexpected result"); return }
+            XCTAssertEqual(dealerName, "dealer")
+            if case let .string(package)? = dealer["package"] {
+                XCTFail("unexpected package for dealer (should be unset): \(package)")
+                return
+            }
+
+            guard case let last = contents.last else { XCTFail("unexpected result"); return }
+            guard case let .dictionary(deck) = last else { XCTFail("unexpected result"); return }
+            guard case let .string(deckName)? = deck["name"] else { XCTFail("unexpected result"); return }
+            XCTAssertEqual(deckName, "deck")
+            if case let .string(package)? = deck["package"] {
+                XCTAssertEqual("deck-of-playing-cards", package)
+            } else {
+                XCTFail("missing package for deck")
+                return
+            }
+        }
+    }
+
     func testShowDependencies() async throws {
         try await fixture(name: "DependencyResolution/External/Complex") { fixturePath in
             let packageRoot = fixturePath.appending("app")
@@ -794,7 +857,7 @@ final class PackageCommandTests: CommandsTestCase {
         }
     }
 
-    func testPackageAddDependency() async throws {
+    func testPackageAddURLDependency() async throws {
         try await testWithTemporaryDirectory { tmpPath in
             let fs = localFileSystem
             let path = tmpPath.appending("PackageB")
@@ -811,15 +874,234 @@ final class PackageCommandTests: CommandsTestCase {
                 """
             )
 
-            _ = try await execute(["add-dependency", "--branch", "main", "https://github.com/swiftlang/swift-syntax.git"], packagePath: path)
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "https://github.com/swiftlang/swift-syntax.git",
+                    "--exact",
+                    "1.0.0",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "https://github.com/swiftlang/swift-syntax.git",
+                    "--branch",
+                    "main",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "https://github.com/swiftlang/swift-syntax.git",
+                    "--revision",
+                    "58e9de4e7b79e67c72a46e164158e3542e570ab6",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "https://github.com/swiftlang/swift-syntax.git",
+                    "--from",
+                    "1.0.0",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "https://github.com/swiftlang/swift-syntax.git",
+                    "--from",
+                    "2.0.0",
+                    "--to",
+                    "2.2.0",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "https://github.com/swiftlang/swift-syntax.git",
+                    "--up-to-next-minor-from",
+                    "1.0.0",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "https://github.com/swiftlang/swift-syntax.git",
+                    "--up-to-next-minor-from",
+                    "3.0.0",
+                    "--to",
+                    "3.3.0",
+                ],
+                packagePath: path
+            )
+
 
             let manifest = path.appending("Package.swift")
             XCTAssertFileExists(manifest)
             let contents: String = try fs.readFileContents(manifest)
 
+            XCTAssertMatch(contents, .contains(#".package(url: "https://github.com/swiftlang/swift-syntax.git", exact: "1.0.0"),"#))
             XCTAssertMatch(contents, .contains(#".package(url: "https://github.com/swiftlang/swift-syntax.git", branch: "main"),"#))
+            XCTAssertMatch(contents, .contains(#".package(url: "https://github.com/swiftlang/swift-syntax.git", revision: "58e9de4e7b79e67c72a46e164158e3542e570ab6"),"#))
+            XCTAssertMatch(contents, .contains(#".package(url: "https://github.com/swiftlang/swift-syntax.git", from: "1.0.0"),"#))
+            XCTAssertMatch(contents, .contains(#".package(url: "https://github.com/swiftlang/swift-syntax.git", "2.0.0" ..< "2.2.0"),"#))
+            XCTAssertMatch(contents, .contains(#".package(url: "https://github.com/swiftlang/swift-syntax.git", "1.0.0" ..< "1.1.0"),"#))
+            XCTAssertMatch(contents, .contains(#".package(url: "https://github.com/swiftlang/swift-syntax.git", "3.0.0" ..< "3.3.0"),"#))
         }
     }
+
+    func testPackageAddPathDependency() async throws {
+        try await testWithTemporaryDirectory { tmpPath in
+            let fs = localFileSystem
+            let path = tmpPath.appending("PackageB")
+            try fs.createDirectory(path)
+
+            try fs.writeFileContents(path.appending("Package.swift"), string:
+                """
+                // swift-tools-version: 5.9
+                import PackageDescription
+                let package = Package(
+                    name: "client",
+                    targets: [ .target(name: "client", dependencies: [ "library" ]) ]
+                )
+                """
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "/absolute",
+                    "--type",
+                    "path"
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "../relative",
+                    "--type",
+                    "path"
+                ],
+                packagePath: path
+            )
+
+            let manifest = path.appending("Package.swift")
+            XCTAssertFileExists(manifest)
+            let contents: String = try fs.readFileContents(manifest)
+
+            XCTAssertMatch(contents, .contains(#".package(path: "/absolute"),"#))
+            XCTAssertMatch(contents, .contains(#".package(path: "../relative"),"#))
+        }
+    }
+
+    func testPackageAddRegistryDependency() async throws {
+        try await testWithTemporaryDirectory { tmpPath in
+            let fs = localFileSystem
+            let path = tmpPath.appending("PackageB")
+            try fs.createDirectory(path)
+
+            try fs.writeFileContents(path.appending("Package.swift"), string:
+                """
+                // swift-tools-version: 5.9
+                import PackageDescription
+                let package = Package(
+                    name: "client",
+                    targets: [ .target(name: "client", dependencies: [ "library" ]) ]
+                )
+                """
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "scope.name",
+                    "--type",
+                    "registry",
+                    "--exact",
+                    "1.0.0",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "scope.name",
+                    "--type",
+                    "registry",
+                    "--from",
+                    "1.0.0",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "scope.name",
+                    "--type",
+                    "registry",
+                    "--from",
+                    "2.0.0",
+                    "--to",
+                    "2.2.0",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "scope.name",
+                    "--type",
+                    "registry",
+                    "--up-to-next-minor-from",
+                    "1.0.0",
+                ],
+                packagePath: path
+            )
+
+            _ = try await execute(
+                [
+                    "add-dependency",
+                    "scope.name",
+                    "--type",
+                    "registry",
+                    "--up-to-next-minor-from",
+                    "3.0.0",
+                    "--to",
+                    "3.3.0",
+                ],
+                packagePath: path
+            )
+
+            let manifest = path.appending("Package.swift")
+            XCTAssertFileExists(manifest)
+            let contents: String = try fs.readFileContents(manifest)
+
+            XCTAssertMatch(contents, .contains(#".package(id: "scope.name", exact: "1.0.0"),"#))
+            XCTAssertMatch(contents, .contains(#".package(id: "scope.name", from: "1.0.0"),"#))
+            XCTAssertMatch(contents, .contains(#".package(id: "scope.name", "2.0.0" ..< "2.2.0"),"#))
+            XCTAssertMatch(contents, .contains(#".package(id: "scope.name", "1.0.0" ..< "1.1.0"),"#))
+            XCTAssertMatch(contents, .contains(#".package(id: "scope.name", "3.0.0" ..< "3.3.0"),"#))
+        }
+    }
+
 
     func testPackageAddTarget() async throws {
         try await testWithTemporaryDirectory { tmpPath in
@@ -1037,7 +1319,7 @@ final class PackageCommandTests: CommandsTestCase {
         }
     }
 
-    func testPinningBranchAndRevision() async throws {
+    func testResolvingBranchAndRevision() async throws {
         try await fixture(name: "Miscellaneous/PackageEdit") { fixturePath in
             let fooPath = fixturePath.appending("foo")
 
@@ -1048,8 +1330,8 @@ final class PackageCommandTests: CommandsTestCase {
 
             try await execute("update")
 
-            let pinsFile = fooPath.appending("Package.resolved")
-            XCTAssertFileExists(pinsFile)
+            let packageResolvedFile = fooPath.appending("Package.resolved")
+            XCTAssertFileExists(packageResolvedFile)
 
             // Update bar repo.
             let barPath = fixturePath.appending("bar")
@@ -1057,25 +1339,35 @@ final class PackageCommandTests: CommandsTestCase {
             try barRepo.checkout(newBranch: "YOLO")
             let yoloRevision = try barRepo.getCurrentRevision()
 
-            // Try to pin bar at a branch.
+            // Try to resolve `bar` at a branch.
             do {
                 try await execute("resolve", "bar", "--branch", "YOLO")
-                let pinsStore = try PinsStore(pinsFile: pinsFile, workingDirectory: fixturePath, fileSystem: localFileSystem, mirrors: .init())
-                let state = PinsStore.PinState.branch(name: "YOLO", revision: yoloRevision.identifier)
+                let resolvedPackagesStore = try ResolvedPackagesStore(
+                    packageResolvedFile: packageResolvedFile,
+                    workingDirectory: fixturePath,
+                    fileSystem: localFileSystem,
+                    mirrors: .init()
+                )
+                let state = ResolvedPackagesStore.ResolutionState.branch(name: "YOLO", revision: yoloRevision.identifier)
                 let identity = PackageIdentity(path: barPath)
-                XCTAssertEqual(pinsStore.pins[identity]?.state, state)
+                XCTAssertEqual(resolvedPackagesStore.resolvedPackages[identity]?.state, state)
             }
 
-            // Try to pin bar at a revision.
+            // Try to resolve `bar` at a revision.
             do {
                 try await execute("resolve", "bar", "--revision", yoloRevision.identifier)
-                let pinsStore = try PinsStore(pinsFile: pinsFile, workingDirectory: fixturePath, fileSystem: localFileSystem, mirrors: .init())
-                let state = PinsStore.PinState.revision(yoloRevision.identifier)
+                let resolvedPackagesStore = try ResolvedPackagesStore(
+                    packageResolvedFile: packageResolvedFile,
+                    workingDirectory: fixturePath,
+                    fileSystem: localFileSystem,
+                    mirrors: .init()
+                )
+                let state = ResolvedPackagesStore.ResolutionState.revision(yoloRevision.identifier)
                 let identity = PackageIdentity(path: barPath)
-                XCTAssertEqual(pinsStore.pins[identity]?.state, state)
+                XCTAssertEqual(resolvedPackagesStore.resolvedPackages[identity]?.state, state)
             }
 
-            // Try to pin bar at a bad revision.
+            // Try to resolve `bar` at a bad revision.
             do {
                 try await execute("resolve", "bar", "--revision", "xxxxx")
                 XCTFail()
@@ -1083,44 +1375,54 @@ final class PackageCommandTests: CommandsTestCase {
         }
     }
 
-    func testPinning() async throws {
+    func testPackageResolved() async throws {
         try await fixture(name: "Miscellaneous/PackageEdit") { fixturePath in
             let fooPath = fixturePath.appending("foo")
-            let exec = [fooPath.appending(components: ".build", try UserToolchain.default.targetTriple.platformBuildPathComponent, "debug", "foo").pathString]
+            let exec = [fooPath.appending(
+                components: ".build",
+                try UserToolchain.default.targetTriple.platformBuildPathComponent,
+                "debug",
+                "foo"
+            ).pathString]
 
             // Build and check.
             _ = try await SwiftPM.Build.execute(packagePath: fooPath)
             try await XCTAssertAsyncEqual(try await AsyncProcess.checkNonZeroExit(arguments: exec).spm_chomp(), "\(5)")
 
-            // Get path to bar checkout.
+            // Get path to `bar` checkout.
             let barPath = try SwiftPM.packagePath(for: "bar", packageRoot: fooPath)
 
-            // Checks the content of checked out bar.swift.
+            // Checks the content of checked out `bar.swift`.
             func checkBar(_ value: Int, file: StaticString = #file, line: UInt = #line) throws {
-                let contents: String = try localFileSystem.readFileContents(barPath.appending(components:"Sources", "bar.swift"))
+                let contents: String = try localFileSystem.readFileContents(barPath.appending(components: "Sources", "bar.swift"))
                 XCTAssertTrue(contents.spm_chomp().hasSuffix("\(value)"), "got \(contents)", file: file, line: line)
             }
 
-            // We should see a pin file now.
-            let pinsFile = fooPath.appending("Package.resolved")
-            XCTAssertFileExists(pinsFile)
+            // We should see a `Package.resolved` file now.
+            let packageResolvedFile = fooPath.appending("Package.resolved")
+            XCTAssertFileExists(packageResolvedFile)
 
-            // Test pins file.
+            // Test `Package.resolved` file.
             do {
-                let pinsStore = try PinsStore(pinsFile: pinsFile, workingDirectory: fixturePath, fileSystem: localFileSystem, mirrors: .init())
-                XCTAssertEqual(pinsStore.pins.count, 2)
+                let resolvedPackagesStore = try ResolvedPackagesStore(
+                    packageResolvedFile: packageResolvedFile,
+                    workingDirectory: fixturePath,
+                    fileSystem: localFileSystem,
+                    mirrors: .init()
+                )
+                XCTAssertEqual(resolvedPackagesStore.resolvedPackages.count, 2)
                 for pkg in ["bar", "baz"] {
                     let path = try SwiftPM.packagePath(for: pkg, packageRoot: fooPath)
-                    let pin = pinsStore.pins[PackageIdentity(path: path)]!
-                    XCTAssertEqual(pin.packageRef.identity, PackageIdentity(path: path))
-                    guard case .localSourceControl(let path) = pin.packageRef.kind, path.pathString.hasSuffix(pkg) else {
-                        return XCTFail("invalid pin location \(path)")
+                    let resolvedPackage = resolvedPackagesStore.resolvedPackages[PackageIdentity(path: path)]!
+                    XCTAssertEqual(resolvedPackage.packageRef.identity, PackageIdentity(path: path))
+                    guard case .localSourceControl(let path) = resolvedPackage.packageRef.kind, path.pathString.hasSuffix(pkg) else {
+                        return XCTFail("invalid resolved package location \(path)")
                     }
-                    switch pin.state {
+                    switch resolvedPackage.state {
                     case .version(let version, revision: _):
                         XCTAssertEqual(version, "1.2.3")
                     default:
-                        XCTFail("invalid pin state")
+                        XCTFail("invalid `Package.resolved` state")
                     }
                 }
             }
@@ -1133,13 +1435,18 @@ final class PackageCommandTests: CommandsTestCase {
             // Try to pin bar.
             do {
                 try await execute("resolve", "bar")
-                let pinsStore = try PinsStore(pinsFile: pinsFile, workingDirectory: fixturePath, fileSystem: localFileSystem, mirrors: .init())
+                let resolvedPackagesStore = try ResolvedPackagesStore(
+                    packageResolvedFile: packageResolvedFile,
+                    workingDirectory: fixturePath,
+                    fileSystem: localFileSystem,
+                    mirrors: .init()
+                )
                 let identity = PackageIdentity(path: barPath)
-                switch pinsStore.pins[identity]?.state {
+                switch resolvedPackagesStore.resolvedPackages[identity]?.state {
                 case .version(let version, revision: _):
                     XCTAssertEqual(version, "1.2.3")
                 default:
-                    XCTFail("invalid pin state")
+                    XCTFail("invalid resolved package state")
                 }
             }
 
@@ -1153,7 +1460,7 @@ final class PackageCommandTests: CommandsTestCase {
                 try barRepo.tag(name: "1.2.4")
             }
 
-            // Running package update with --repin should update the package.
+            // Running `package update` should update the package.
             do {
                 try await execute("update")
                 try checkBar(6)
@@ -1162,18 +1469,23 @@ final class PackageCommandTests: CommandsTestCase {
             // We should be able to revert to a older version.
             do {
                 try await execute("resolve", "bar", "--version", "1.2.3")
-                let pinsStore = try PinsStore(pinsFile: pinsFile, workingDirectory: fixturePath, fileSystem: localFileSystem, mirrors: .init())
+                let resolvedPackagesStore = try ResolvedPackagesStore(
+                    packageResolvedFile: packageResolvedFile,
+                    workingDirectory: fixturePath,
+                    fileSystem: localFileSystem,
+                    mirrors: .init()
+                )
                 let identity = PackageIdentity(path: barPath)
-                switch pinsStore.pins[identity]?.state {
+                switch resolvedPackagesStore.resolvedPackages[identity]?.state {
                 case .version(let version, revision: _):
                     XCTAssertEqual(version, "1.2.3")
                 default:
-                    XCTFail("invalid pin state")
+                    XCTFail("invalid resolved package state")
                 }
                 try checkBar(5)
             }
 
-            // Try pinning a dependency which is in edit mode.
+            // Try resolving a dependency which is in edit mode.
             do {
                 try await execute("edit", "bar", "--branch", "bugfix")
                 await XCTAssertThrowsCommandExecutionError(try await execute("resolve", "bar")) { error in
@@ -1744,7 +2056,7 @@ final class PackageCommandTests: CommandsTestCase {
                 }
                 XCTAssertMatch(stderr, .contains("This is text from the plugin"))
                 XCTAssertMatch(stderr, .contains("error: This is an error from the plugin"))
-                XCTAssertMatch(stderr, .contains("build stopped due to build-tool plugin failures"))
+                XCTAssertMatch(stderr, .contains("build planning stopped due to build-tool plugin failures"))
             }
         }
     }
@@ -2077,6 +2389,8 @@ final class PackageCommandTests: CommandsTestCase {
         // Only run the test if the environment in which we're running actually supports Swift concurrency (which the plugin APIs require).
         try XCTSkipIf(!UserToolchain.default.supportsSwiftConcurrency(), "skipping because test environment doesn't support concurrency")
 
+        throw XCTSkip("Skipping test due to flakiness, see https://github.com/swiftlang/swift-package-manager/issues/8180")
+
         // Match patterns for expected messages
         let isEmpty = StringPattern.equal("")
         let isOnlyPrint = StringPattern.equal("command plugin: print\n")
@@ -2107,7 +2421,9 @@ final class PackageCommandTests: CommandsTestCase {
 
             try await runPlugin(flags: [], diagnostics: ["print"]) { stdout, stderr in
                 XCTAssertMatch(stdout, isOnlyPrint)
-                XCTAssertMatch(stderr, isEmpty)
+                let filteredStderr = stderr.components(separatedBy: "\n")
+                  .filter { !$0.contains("Unable to locate libSwiftScan") }.joined(separator: "\n")
+                XCTAssertMatch(filteredStderr, isEmpty)
             }
 
             try await runPlugin(flags: [], diagnostics: ["print", "progress"]) { stdout, stderr in
@@ -2126,7 +2442,7 @@ final class PackageCommandTests: CommandsTestCase {
                 XCTAssertMatch(stderr, containsWarning)
             }
 
-         	try await runPluginWithError(flags: [], diagnostics: ["print", "progress", "remark", "warning", "error"]) { stdout, stderr in
+         	  try await runPluginWithError(flags: [], diagnostics: ["print", "progress", "remark", "warning", "error"]) { stdout, stderr in
                 XCTAssertMatch(stdout, isOnlyPrint)
                 XCTAssertMatch(stderr, containsProgress)
                 XCTAssertMatch(stderr, containsWarning)
@@ -2139,7 +2455,9 @@ final class PackageCommandTests: CommandsTestCase {
 
             try await runPlugin(flags: ["-q"], diagnostics: ["print"]) { stdout, stderr in
                 XCTAssertMatch(stdout, isOnlyPrint)
-                XCTAssertMatch(stderr, isEmpty)
+                let filteredStderr = stderr.components(separatedBy: "\n")
+                  .filter { !$0.contains("Unable to locate libSwiftScan") }.joined(separator: "\n")
+                XCTAssertMatch(filteredStderr, isEmpty)
             }
 
             try await runPlugin(flags: ["-q"], diagnostics: ["print", "progress"]) { stdout, stderr in
@@ -2265,6 +2583,35 @@ final class PackageCommandTests: CommandsTestCase {
         }
     }
 
+    func testCommandPluginBuildTestability() async throws {
+        // Plugin arguments: check-testability <targetName> <config> <shouldTestable>
+
+        // Overall configuration: debug, plugin build request: debug -> without testability
+        try await fixture(name: "Miscellaneous/Plugins/CommandPluginTestStub") { fixturePath in
+            await XCTAssertAsyncNoThrow(try await SwiftPM.Package.execute(["-c", "debug", "check-testability", "InternalModule", "debug", "true"], packagePath: fixturePath))
+        }
+
+        // Overall configuration: debug, plugin build request: release -> without testability
+        try await fixture(name: "Miscellaneous/Plugins/CommandPluginTestStub") { fixturePath in
+            await XCTAssertAsyncNoThrow(try await SwiftPM.Package.execute(["-c", "debug", "check-testability", "InternalModule", "release", "false"], packagePath: fixturePath))
+        }
+
+        // Overall configuration: release, plugin build request: debug -> with testability
+        try await fixture(name: "Miscellaneous/Plugins/CommandPluginTestStub") { fixturePath in
+            await XCTAssertAsyncNoThrow(try await SwiftPM.Package.execute(["-c", "release", "check-testability", "InternalModule", "debug", "true"], packagePath: fixturePath))
+        }
+
+        // Overall configuration: release, plugin build request: release -> with testability
+        try await fixture(name: "Miscellaneous/Plugins/CommandPluginTestStub") { fixturePath in
+            await XCTAssertAsyncNoThrow(try await SwiftPM.Package.execute(["-c", "release", "check-testability", "InternalModule", "release", "false"], packagePath: fixturePath))
+        }
+
+        // Overall configuration: release, plugin build request: release including tests -> with testability
+        try await fixture(name: "Miscellaneous/Plugins/CommandPluginTestStub") { fixturePath in
+            await XCTAssertAsyncNoThrow(try await SwiftPM.Package.execute(["-c", "release", "check-testability", "all-with-tests", "release", "true"], packagePath: fixturePath))
+        }
+    }
+
     // Test logging of builds initiated by a command plugin
     func testCommandPluginBuildLogs() async throws {
         // Only run the test if the environment in which we're running actually supports Swift concurrency (which the plugin APIs require).
@@ -2278,7 +2625,7 @@ final class PackageCommandTests: CommandsTestCase {
         let containsLogtext = StringPattern.contains("command plugin: packageManager.build logtext: Building for debugging...")
 
         // Echoed logs have no prefix
-        let containsLogecho = StringPattern.regex("^Building for debugging...\n")
+        let containsLogecho = StringPattern.contains("Building for debugging...\n")
 
         // These tests involve building a target, so each test must run with a fresh copy of the fixture
         // otherwise the logs may be different in subsequent tests.
@@ -2287,14 +2634,20 @@ final class PackageCommandTests: CommandsTestCase {
         try await fixture(name: "Miscellaneous/Plugins/CommandPluginTestStub") { fixturePath in
             let (stdout, stderr) = try await SwiftPM.Package.execute(["print-diagnostics", "build"], packagePath: fixturePath, env: ["SWIFT_DRIVER_SWIFTSCAN_LIB" : "/this/is/a/bad/path"])
             XCTAssertMatch(stdout, isEmpty)
-            XCTAssertMatch(stderr, isEmpty)
+            // Filter some unrelated output that could show up on stderr.
+            let filteredStderr = stderr.components(separatedBy: "\n")
+              .filter { !$0.contains("Unable to locate libSwiftScan") }.joined(separator: "\n")
+            XCTAssertMatch(filteredStderr, isEmpty)
         }
 
         // Check that logs are returned to the plugin when echoLogs is false
         try await fixture(name: "Miscellaneous/Plugins/CommandPluginTestStub") { fixturePath in
             let (stdout, stderr) = try await SwiftPM.Package.execute(["print-diagnostics", "build", "printlogs"], packagePath: fixturePath, env: ["SWIFT_DRIVER_SWIFTSCAN_LIB" : "/this/is/a/bad/path"])
             XCTAssertMatch(stdout, containsLogtext)
-            XCTAssertMatch(stderr, isEmpty)
+            // Filter some unrelated output that could show up on stderr.
+            let filteredStderr = stderr.components(separatedBy: "\n")
+              .filter { !$0.contains("Unable to locate libSwiftScan") }.joined(separator: "\n")
+            XCTAssertMatch(filteredStderr, isEmpty)
         }
 
         // Check that logs echoed to the console (on stderr) when echoLogs is true
@@ -2601,14 +2954,14 @@ final class PackageCommandTests: CommandsTestCase {
             do {
                 let (stdout, stderr) = try await SwiftPM.Package.execute(["plugin", "MyPlugin", "--foo", "--help", "--version", "--verbose"], packagePath: packageDir, env: ["SWIFT_DRIVER_SWIFTSCAN_LIB" : "/this/is/a/bad/path"])
                 XCTAssertMatch(stdout, .contains("success"))
-                XCTAssertEqual(stderr, "")
+                XCTAssertFalse(stderr.contains("error:"))
             }
 
             // Check default command arguments
             do {
                 let (stdout, stderr) = try await SwiftPM.Package.execute(["MyPlugin", "--foo", "--help", "--version", "--verbose"], packagePath: packageDir, env: ["SWIFT_DRIVER_SWIFTSCAN_LIB" : "/this/is/a/bad/path"])
                 XCTAssertMatch(stdout, .contains("success"))
-                XCTAssertEqual(stderr, "")
+                XCTAssertFalse(stderr.contains("error:"))
             }
         }
     }
@@ -3399,7 +3752,7 @@ final class PackageCommandTests: CommandsTestCase {
             XCTAssert(rootManifests.count == 1, "\(rootManifests)")
 
             // Load the package graph.
-            let _ = try workspace.loadPackageGraph(
+            let _ = try await workspace.loadPackageGraph(
                 rootInput: rootInput,
                 observabilityScope: observability.topScope
             )

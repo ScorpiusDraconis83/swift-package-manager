@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2014-2022 Apple Inc. and the Swift project authors
+// Copyright (c) 2014-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -15,10 +15,9 @@ import _InternalTestSupport
 import XCTest
 import TSCclibc // for SPM_posix_spawn_file_actions_addchdir_np_supported
 
-import class TSCBasic.InMemoryFileSystem
 import struct TSCBasic.FileSystemError
 
-class ZipArchiverTests: XCTestCase {
+final class ZipArchiverTests: XCTestCase {
     func testZipArchiverSuccess() async throws {
         try await testWithTemporaryDirectory { tmpdir in
             let archiver = ZipArchiver(fileSystem: localFileSystem)
@@ -119,6 +118,7 @@ class ZipArchiverTests: XCTestCase {
              try localFileSystem.createDirectory(dir2)
              try localFileSystem.writeFileContents(dir2.appending("file3.txt"), string: "Hello World 3!")
              try localFileSystem.writeFileContents(dir2.appending("file4.txt"), string: "Hello World 4!")
+             try localFileSystem.createSymbolicLink(dir2.appending("file5.txt"), pointingAt: dir1.appending("file2.txt"), relative: true)
 
              let archivePath = tmpdir.appending(component: UUID().uuidString + ".zip")
              try await archiver.compress(directory: rootDir, to: archivePath)
@@ -154,6 +154,12 @@ class ZipArchiverTests: XCTestCase {
              XCTAssertEqual(
                  try? localFileSystem.readFileContents(extractedDir2.appending("file4.txt")),
                  "Hello World 4!"
+             )
+            
+             XCTAssertTrue(localFileSystem.isSymlink(extractedDir2.appending("file5.txt")))
+             XCTAssertEqual(
+                 try? localFileSystem.readFileContents(extractedDir2.appending("file5.txt")),
+                 try? localFileSystem.readFileContents(extractedDir1.appending("file2.txt"))
              )
          }
      }

@@ -102,61 +102,31 @@ public class LLBuildManifestBuilder {
             try addTargetsToExplicitBuildManifest()
         } else {
             // Create commands for all target descriptions in the plan.
-            for (_, description) in self.plan.targetMap {
+            for description in self.plan.targetMap {
                 switch description {
                 case .swift(let desc):
                     try self.createSwiftCompileCommand(desc)
                 case .clang(let desc):
-                    try self.createClangCompileCommand(desc)
+                    if desc.buildParameters.prepareForIndexing == .off {
+                        try self.createClangCompileCommand(desc)
+                    } else {
+                        // Hook up the clang module target when preparing
+                        try self.createClangPrepareCommand(desc)
+                    }
                 }
             }
         }
 
-        if self.plan.destinationBuildParameters.testingParameters.library == .xctest {
+        // Skip test discovery if preparing for indexing
+        if self.plan.destinationBuildParameters.prepareForIndexing == .off {
             try self.addTestDiscoveryGenerationCommand()
+            try self.addTestEntryPointGenerationCommand()
         }
-        try self.addTestEntryPointGenerationCommand()
 
         // Create command for all products in the plan.
-        for (_, description) in self.plan.productMap {
-            try self.createProductCommand(description)
-        }
-
-        try LLBuildManifestWriter.write(self.manifest, at: path, fileSystem: self.fileSystem)
-        return self.manifest
-    }
-
-    package func generatePrepareManifest(at path: AbsolutePath) throws -> LLBuildManifest {
-        self.swiftGetVersionFiles.removeAll()
-
-        self.manifest.createTarget(TargetKind.main.targetName)
-        self.manifest.createTarget(TargetKind.test.targetName)
-        self.manifest.defaultTarget = TargetKind.main.targetName
-
-        addPackageStructureCommand()
-
-        for (_, description) in self.plan.targetMap {
-            switch description {
-            case .swift(let desc):
-                try self.createSwiftCompileCommand(desc)
-            case .clang(let desc):
-                if desc.target.buildTriple == .tools {
-                    // Need the clang modules for tools
-                    try self.createClangCompileCommand(desc)
-                } else {
-                    // Hook up the clang module target
-                    try self.createClangPrepareCommand(desc)
-                }
-            }
-        }
-
-        for (_, description) in self.plan.productMap {
-            // Need to generate macro products
-            switch description.product.type {
-            case .macro, .plugin:
+        for description in self.plan.productMap {
+            if description.buildParameters.prepareForIndexing == .off {
                 try self.createProductCommand(description)
-            default:
-                break
             }
         }
 
@@ -201,6 +171,9 @@ extension LLBuildManifestBuilder {
         // its source binary.
         var destinations = [AbsolutePath: AbsolutePath]()
         for target in self.plan.targetMap.values {
+            // skip if target is preparing for indexing
+            guard target.buildParameters.prepareForIndexing == .off else { continue }
+
             for binaryPath in target.libraryBinaryPaths {
                 destinations[target.buildParameters.destinationPath(forBinaryAt: binaryPath)] = binaryPath
             }
@@ -241,11 +214,11 @@ extension LLBuildManifestBuilder {
                 let additionalOutputs: [Node]
                 if command.outputFiles.isEmpty {
                     if target.toolsVersion >= .v6_0 {
-                        additionalOutputs = [.virtual("\(target.target.c99name)-\(command.configuration.displayName ?? "\(pluginNumber)")")]
+                        additionalOutputs = [.virtual("\(target.module.c99name)-\(command.configuration.displayName ?? "\(pluginNumber)")")]
                         phonyOutputs += additionalOutputs
                     } else {
                         additionalOutputs = []
-                        observabilityScope.emit(warning: "Build tool command '\(displayName)' (applied to target '\(target.target.name)') does not declare any output files and therefore will not run. You may want to consider updating the given package to tools-version 6.0 (or higher) which would run such a build tool command even without declared outputs.")
+                        observabilityScope.emit(warning: "Build tool command '\(displayName)' (applied to target '\(target.module.name)') does not declare any output files and therefore will not run. You may want to consider updating the given package to tools-version 6.0 (or higher) which would run such a build tool command even without declared outputs.")
                     }
                     pluginNumber += 1
                 } else {
@@ -273,7 +246,7 @@ extension LLBuildManifestBuilder {
     private func addTestDiscoveryGenerationCommand() throws {
         for testDiscoveryTarget in self.plan.targets.compactMap(\.testDiscoveryTargetBuildDescription) {
             let testTargets = testDiscoveryTarget.target.dependencies
-                .compactMap(\.module).compactMap { self.plan.targetMap[$0.id] }
+                .compactMap(\.module).compactMap { self.plan.description(for: $0, context: testDiscoveryTarget.destination) }
             let objectFiles = try testTargets.flatMap { try $0.objects }.sorted().map(Node.file)
             let outputs = testDiscoveryTarget.target.sources.paths
 
@@ -290,18 +263,22 @@ extension LLBuildManifestBuilder {
     }
 
     private func addTestEntryPointGenerationCommand() throws {
-        for target in self.plan.targets {
-            guard case .swift(let target) = target,
-                  case .entryPoint(let isSynthesized) = target.testTargetRole,
+        for module in self.plan.targets {
+            guard case .swift(let swiftModule) = module,
+                  case .entryPoint(let isSynthesized) = swiftModule.testTargetRole,
                   isSynthesized else { continue }
 
-            let testEntryPointTarget = target
+            let testEntryPointTarget = swiftModule
 
             // Get the Swift target build descriptions of all discovery modules this synthesized entry point target
             // depends on.
-            let discoveredTargetDependencyBuildDescriptions = testEntryPointTarget.target.dependencies
-                .compactMap(\.module?.id)
-                .compactMap { self.plan.targetMap[$0] }
+            let discoveredTargetDependencyBuildDescriptions = module.dependencies(using: self.plan)
+                .compactMap {
+                    if case .module(_, let description) = $0 {
+                        return description
+                    }
+                    return nil
+                }
                 .compactMap(\.testDiscoveryTargetBuildDescription)
 
             // The module outputs of the discovery modules this synthesized entry point target depends on are
@@ -310,9 +287,7 @@ extension LLBuildManifestBuilder {
 
             let outputs = testEntryPointTarget.target.sources.paths
 
-            let mainFileName = TestEntryPointTool.mainFileName(
-                for: self.plan.destinationBuildParameters.testingParameters.library
-            )
+            let mainFileName = TestEntryPointTool.mainFileName
             guard let mainOutput = (outputs.first { $0.basename == mainFileName }) else {
                 throw InternalError("main output (\(mainFileName)) not found")
             }
@@ -338,7 +313,7 @@ extension ModuleBuildDescription {
 
 extension ModuleBuildDescription {
     package var llbuildResourcesCmdName: String {
-        "\(self.target.name)-\(self.buildParameters.triple.tripleString)-\(self.buildParameters.buildConfig)\(self.buildParameters.suffix).module-resources"
+        "\(self.module.name)-\(self.buildParameters.triple.tripleString)-\(self.buildParameters.buildConfig)\(self.buildParameters.suffix).module-resources"
     }
 }
 

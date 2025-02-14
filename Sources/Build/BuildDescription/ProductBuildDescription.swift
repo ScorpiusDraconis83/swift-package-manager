@@ -37,6 +37,11 @@ public final class ProductBuildDescription: SPMBuildCore.ProductBuildDescription
     /// The build parameters.
     public let buildParameters: BuildParameters
 
+    /// The destination for while this product is built.
+    public var destination: BuildParameters.Destination {
+        self.buildParameters.destination
+    }
+
     /// All object files to link into this product.
     ///
     // Computed during build planning.
@@ -45,9 +50,6 @@ public final class ProductBuildDescription: SPMBuildCore.ProductBuildDescription
     /// The dynamic libraries this product needs to link with.
     // Computed during build planning.
     var dylibs: [ProductBuildDescription] = []
-
-    /// The list of provided libraries that are going to be used by this product.
-    var providedLibraries: [String: AbsolutePath] = [:]
 
     /// Any additional flags to be added. These flags are expected to be computed during build planning.
     var additionalFlags: [String] = []
@@ -161,8 +163,6 @@ public final class ProductBuildDescription: SPMBuildCore.ProductBuildDescription
             args += ["-F", self.buildParameters.buildPath.pathString]
         }
 
-        self.providedLibraries.forEach { args += ["-L", $1.pathString, "-l", $0] }
-
         args += ["-L", self.buildParameters.buildPath.pathString]
         args += try ["-o", binaryPath.pathString]
         args += ["-module-name", self.product.name.spm_mangledToC99ExtendedIdentifier()]
@@ -194,6 +194,8 @@ public final class ProductBuildDescription: SPMBuildCore.ProductBuildDescription
         if triple.isMacOSX {
             args += ["-Xlinker", "-no_warn_duplicate_libraries"]
         }
+        // We may also need to turn off locally defined symbol imported on Windows
+        // args += ["-Xlinker", "/ignore:4217"]
 
         switch derivedProductType {
         case .macro:
@@ -205,7 +207,7 @@ public final class ProductBuildDescription: SPMBuildCore.ProductBuildDescription
             return []
         case .test:
             // Test products are bundle when using Objective-C, executable when using test entry point.
-            switch self.buildParameters.testingParameters.testProductStyle {
+            switch self.buildParameters.testProductStyle {
             case .loadableBundle:
                 args += ["-Xlinker", "-bundle"]
             case .entryPointExecutable:
@@ -399,6 +401,17 @@ public final class ProductBuildDescription: SPMBuildCore.ProductBuildDescription
 
     func codeSigningArguments(plistPath: AbsolutePath, binaryPath: AbsolutePath) -> [String] {
         ["codesign", "--force", "--sign", "-", "--entitlements", plistPath.pathString, binaryPath.pathString]
+    }
+}
+
+extension ProductBuildDescription: Identifiable {
+    public struct ID: Hashable {
+        let productID: ResolvedProduct.ID
+        let destination: BuildParameters.Destination
+    }
+
+    public var id: ID {
+        ID(productID: self.product.id, destination: self.destination)
     }
 }
 

@@ -21,22 +21,22 @@ import protocol TSCBasic.OutputByteStream
 import var TSCBasic.stdoutStream
 
 extension SwiftPackageCommand {
-    struct ShowDependencies: SwiftCommand {
+    struct ShowDependencies: AsyncSwiftCommand {
         static let configuration = CommandConfiguration(
             abstract: "Print the resolved dependency graph")
 
         @OptionGroup(visibility: .hidden)
         var globalOptions: GlobalOptions
 
-        @Option(help: "text | dot | json | flatlist")
+        @Option(help: "Set the output format")
         var format: ShowDependenciesMode = .text
 
         @Option(name: [.long, .customShort("o") ],
                 help: "The absolute or relative path to output the resolved dependency graph.")
         var outputPath: AbsolutePath?
 
-        func run(_ swiftCommandState: SwiftCommandState) throws {
-            let graph = try swiftCommandState.loadPackageGraph()
+        func run(_ swiftCommandState: SwiftCommandState) async throws {
+            let graph = try await swiftCommandState.loadPackageGraph()
             // command's result output goes on stdout
             // ie "swift package show-dependencies" should output to stdout
             let stream: OutputByteStream = try outputPath.map { try LocalFileOutputByteStream($0) } ?? TSCBasic.stdoutStream
@@ -69,7 +69,7 @@ extension SwiftPackageCommand {
             stream.flush()
         }
 
-        enum ShowDependenciesMode: String, RawRepresentable, CustomStringConvertible, ExpressibleByArgument {
+        enum ShowDependenciesMode: String, RawRepresentable, CustomStringConvertible, ExpressibleByArgument, CaseIterable {
             case text, dot, json, flatlist
 
             public init?(rawValue: String) {

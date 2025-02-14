@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import _Concurrency
 import Basics
 import Foundation
 import LLBuildManifest
@@ -196,10 +197,10 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
     public let graph: ModulesGraph
 
     /// The target build description map.
-    public let targetMap: [ResolvedModule.ID: ModuleBuildDescription]
+    public let targetMap: IdentifiableSet<ModuleBuildDescription>
 
     /// The product build description map.
-    public let productMap: [ResolvedProduct.ID: ProductBuildDescription]
+    public let productMap: IdentifiableSet<ProductBuildDescription>
 
     /// The plugin descriptions. Plugins are represented in the package graph
     /// as targets, but they are not directly included in the build graph.
@@ -215,12 +216,16 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
         AnySequence(self.productMap.values.map { $0 as SPMBuildCore.ProductBuildDescription })
     }
 
+    public var buildModules: AnySequence<SPMBuildCore.ModuleBuildDescription> {
+        AnySequence(self.targetMap.values.map { $0 as SPMBuildCore.ModuleBuildDescription })
+    }
+
     /// The results of invoking any build tool plugins used by targets in this build.
     public let buildToolPluginInvocationResults: [ResolvedModule.ID: [BuildToolPluginInvocationResult]]
 
     /// The results of running any prebuild commands for the targets in this build.  This includes any derived
     /// source files as well as directories to which any changes should cause us to reevaluate the build plan.
-    public let prebuildCommandResults: [ResolvedModule.ID: [PrebuildCommandResult]]
+    public let prebuildCommandResults: [ResolvedModule.ID: [CommandPluginResult]]
 
     @_spi(SwiftPMInternal)
     public private(set) var derivedTestTargetsMap: [ResolvedProduct.ID: [ResolvedModule]] = [:]
@@ -250,11 +255,12 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
         graph: ModulesGraph,
         fileSystem: any FileSystem,
         observabilityScope: ObservabilityScope
-    ) throws {
-        try self.init(
+    ) async throws {
+        try await self.init(
             destinationBuildParameters: productsBuildParameters,
             toolsBuildParameters: toolsBuildParameters,
             graph: graph,
+            pluginConfiguration: nil,
             fileSystem: fileSystem,
             observabilityScope: observabilityScope
         )
@@ -266,171 +272,184 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
         destinationBuildParameters: BuildParameters,
         toolsBuildParameters: BuildParameters,
         graph: ModulesGraph,
+        pluginConfiguration: PluginConfiguration? = nil,
+        pluginTools: [ResolvedModule.ID: [String: PluginTool]] = [:],
         additionalFileRules: [FileRuleDescription] = [],
-        buildToolPluginInvocationResults: [ResolvedModule.ID: [BuildToolPluginInvocationResult]] = [:],
-        prebuildCommandResults: [ResolvedModule.ID: [PrebuildCommandResult]] = [:],
+        pkgConfigDirectories: [AbsolutePath] = [],
         disableSandbox: Bool = false,
         fileSystem: any FileSystem,
         observabilityScope: ObservabilityScope
-    ) throws {
+    ) async throws {
         self.destinationBuildParameters = destinationBuildParameters
         self.toolsBuildParameters = toolsBuildParameters
         self.graph = graph
-        self.buildToolPluginInvocationResults = buildToolPluginInvocationResults
-        self.prebuildCommandResults = prebuildCommandResults
         self.shouldDisableSandbox = disableSandbox
         self.fileSystem = fileSystem
-        self.observabilityScope = observabilityScope.makeChildScope(description: "Build Plan")
 
-        var productMap: [ResolvedProduct.ID: (product: ResolvedProduct, buildDescription: ProductBuildDescription)] =
-            [:]
+        var buildToolPluginInvocationResults: [ResolvedModule.ID: [BuildToolPluginInvocationResult]] = [:]
+        var prebuildCommandResults: [ResolvedModule.ID: [CommandPluginResult]] = [:]
+
         // Create product description for each product we have in the package graph that is eligible.
-        for product in graph.allProducts where product.shouldCreateProductDescription {
-            let buildParameters: BuildParameters
-            switch product.buildTriple {
-            case .tools:
-                buildParameters = toolsBuildParameters
-            case .destination:
-                buildParameters = destinationBuildParameters
-            }
-
-            guard let package = graph.package(for: product) else {
-                throw InternalError("unknown package for \(product)")
-            }
-            // Determine the appropriate tools version to use for the product.
-            // This can affect what flags to pass and other semantics.
-            let toolsVersion = package.manifest.toolsVersion
-            productMap[product.id] = try (product, ProductBuildDescription(
-                package: package,
-                product: product,
-                toolsVersion: toolsVersion,
-                buildParameters: buildParameters,
-                fileSystem: fileSystem,
-                observabilityScope: observabilityScope
-            ))
-        }
-        let macroProductsByTarget = productMap.values.filter { $0.product.type == .macro }
-            .reduce(into: [ResolvedModule.ID: ResolvedProduct]()) {
-                if let target = $1.product.modules.first {
-                    $0[target.id] = $1.product
-                }
-            }
-
+        var productMap = IdentifiableSet<ProductBuildDescription>()
         // Create build target description for each target which we need to plan.
         // Plugin targets are noted, since they need to be compiled, but they do
         // not get directly incorporated into the build description that will be
         // given to LLBuild.
-        var targetMap = [ResolvedModule.ID: ModuleBuildDescription]()
+        var targetMap = IdentifiableSet<ModuleBuildDescription>()
         var pluginDescriptions = [PluginBuildDescription]()
         var shouldGenerateTestObservation = true
-        for target in graph.allModules.sorted(by: { $0.name < $1.name }) {
-            let buildParameters: BuildParameters
-            switch target.buildTriple {
-            case .tools:
-                buildParameters = toolsBuildParameters
-            case .destination:
-                buildParameters = destinationBuildParameters
-            }
 
-            // Validate the product dependencies of this target.
-            for dependency in target.dependencies {
-                guard dependency.satisfies(buildParameters.buildEnvironment) else {
-                    continue
+        let planningObservabilityScope = observabilityScope.makeChildScope(description: "Planning")
+        try await Self.computeDestinations(
+            graph: graph,
+            onProduct: { product, destination in
+                if !product.shouldCreateProductDescription {
+                    return
                 }
 
-                switch dependency {
-                case .module: break
-                case .product(let product, _):
-                    if buildParameters.triple.isDarwin() {
-                        try BuildPlan.validateDeploymentVersionOfProductDependency(
-                            product: product,
-                            forTarget: target,
-                            buildEnvironment: buildParameters.buildEnvironment,
-                            observabilityScope: self.observabilityScope
-                        )
-                    }
-                }
-            }
-
-            // Determine the appropriate tools version to use for the target.
-            // This can affect what flags to pass and other semantics.
-            let toolsVersion = graph.package(for: target)?.manifest.toolsVersion ?? .v5_5
-
-            switch target.underlying {
-            case is SwiftModule:
-                guard let package = graph.package(for: target) else {
-                    throw InternalError("package not found for \(target)")
+                guard let package = graph.package(for: product) else {
+                    throw InternalError("Package not found for product: \(product.name)")
                 }
 
-                let requiredMacroProducts = try target.recursiveModuleDependencies()
-                    .filter { $0.underlying.type == .macro }
-                    .compactMap {
-                        guard let product = macroProductsByTarget[$0.id],
-                              let description = productMap[product.id] else
-                        {
-                            throw InternalError("macro product not found for \($0)")
-                        }
-
-                        return description.buildDescription
-                    }
-
-                var generateTestObservation = false
-                if target.type == .test && shouldGenerateTestObservation {
-                    generateTestObservation = true
-                    shouldGenerateTestObservation = false // Only generate the code once.
-                }
-
-                targetMap[target.id] = try .swift(
-                    SwiftModuleBuildDescription(
-                        package: package,
-                        target: target,
-                        toolsVersion: toolsVersion,
-                        additionalFileRules: additionalFileRules,
-                        buildParameters: buildParameters,
-                        buildToolPluginInvocationResults: buildToolPluginInvocationResults[target.id] ?? [],
-                        prebuildCommandResults: prebuildCommandResults[target.id] ?? [],
-                        requiredMacroProducts: requiredMacroProducts,
-                        shouldGenerateTestObservation: generateTestObservation,
-                        shouldDisableSandbox: self.shouldDisableSandbox,
-                        fileSystem: fileSystem,
-                        observabilityScope: observabilityScope
-                    )
-                )
-            case is ClangModule:
-                guard let package = graph.package(for: target) else {
-                    throw InternalError("package not found for \(target)")
-                }
-
-                targetMap[target.id] = try .clang(
-                    ClangModuleBuildDescription(
-                        package: package,
-                        target: target,
-                        toolsVersion: toolsVersion,
-                        additionalFileRules: additionalFileRules,
-                        buildParameters: buildParameters,
-                        buildToolPluginInvocationResults: buildToolPluginInvocationResults[target.id] ?? [],
-                        prebuildCommandResults: prebuildCommandResults[target.id] ?? [],
-                        fileSystem: fileSystem,
-                        observabilityScope: observabilityScope
-                    )
-                )
-            case is PluginModule:
-                guard let package = graph.package(for: target) else {
-                    throw InternalError("package not found for \(target)")
-                }
-                try pluginDescriptions.append(PluginBuildDescription(
-                    module: target,
-                    products: package.products.filter { $0.modules.contains(id: target.id) },
+                try productMap.insert(ProductBuildDescription(
                     package: package,
-                    toolsVersion: toolsVersion,
-                    fileSystem: fileSystem
+                    product: product,
+                    toolsVersion: package.manifest.toolsVersion,
+                    buildParameters: destination == .host ? toolsBuildParameters : destinationBuildParameters,
+                    fileSystem: fileSystem,
+                    observabilityScope: planningObservabilityScope
                 ))
-            case is SystemLibraryModule, is BinaryModule, is ProvidedLibraryModule:
-                break
-            default:
-                throw InternalError("unhandled \(target.underlying)")
+            },
+            onModule: { module, destination in
+                guard let package = graph.package(for: module) else {
+                    throw InternalError("Package not found for module: \(module.name)")
+                }
+
+                let buildParameters = destination == .host ? toolsBuildParameters : destinationBuildParameters
+
+                // Validate the product dependencies of this target.
+                for dependency in module.dependencies {
+                    guard dependency.satisfies(buildParameters.buildEnvironment) else {
+                        continue
+                    }
+
+                    switch dependency {
+                    case .module: break
+                    case .product(let product, _):
+                        if buildParameters.triple.isDarwin() {
+                            try BuildPlan.validateDeploymentVersionOfProductDependency(
+                                product: product,
+                                forTarget: module,
+                                buildEnvironment: buildParameters.buildEnvironment,
+                                observabilityScope: planningObservabilityScope
+                                                        .makeChildScope(description: "Validate Deployment of Dependency")
+                            )
+                        }
+                    }
+                }
+
+                if let pluginConfiguration, !buildParameters.shouldSkipBuilding {
+                    let pluginInvocationResults = try await Self.invokeBuildToolPlugins(
+                        for: module,
+                        destination: destination,
+                        configuration: pluginConfiguration,
+                        buildParameters: toolsBuildParameters,
+                        modulesGraph: graph,
+                        tools: pluginTools,
+                        additionalFileRules: additionalFileRules,
+                        pkgConfigDirectories: pkgConfigDirectories,
+                        fileSystem: fileSystem,
+                        observabilityScope: planningObservabilityScope,
+                        surfaceDiagnostics: true
+                    )
+
+                    if pluginInvocationResults.contains(where: { !$0.succeeded }) {
+                        throw StringError("build planning stopped due to build-tool plugin failures")
+                    }
+
+                    buildToolPluginInvocationResults[module.id] = pluginInvocationResults
+                    prebuildCommandResults[module.id] = try Self.runCommandPlugins(
+                        using: pluginConfiguration,
+                        for: pluginInvocationResults,
+                        fileSystem: fileSystem,
+                        observabilityScope: planningObservabilityScope
+                    )
+                }
+
+                switch module.underlying {
+                case is SwiftModule:
+                    var generateTestObservation = false
+                    if module.type == .test && shouldGenerateTestObservation {
+                        generateTestObservation = true
+                        shouldGenerateTestObservation = false // Only generate the code once.
+                    }
+
+                    try targetMap.insert(.swift(
+                        SwiftModuleBuildDescription(
+                            package: package,
+                            target: module,
+                            toolsVersion: package.manifest.toolsVersion,
+                            additionalFileRules: additionalFileRules,
+                            buildParameters: buildParameters,
+                            macroBuildParameters: toolsBuildParameters,
+                            buildToolPluginInvocationResults: buildToolPluginInvocationResults[module.id] ?? [],
+                            prebuildCommandResults: prebuildCommandResults[module.id] ?? [],
+                            shouldGenerateTestObservation: generateTestObservation,
+                            shouldDisableSandbox: disableSandbox,
+                            fileSystem: fileSystem,
+                            observabilityScope: planningObservabilityScope
+                        )
+                    ))
+                case is ClangModule:
+                    try targetMap.insert(.clang(
+                        ClangModuleBuildDescription(
+                            package: package,
+                            target: module,
+                            toolsVersion: package.manifest.toolsVersion,
+                            additionalFileRules: additionalFileRules,
+                            buildParameters: buildParameters,
+                            buildToolPluginInvocationResults: buildToolPluginInvocationResults[module.id] ?? [],
+                            prebuildCommandResults: prebuildCommandResults[module.id] ?? [],
+                            fileSystem: fileSystem,
+                            observabilityScope: planningObservabilityScope
+                        )
+                    ))
+                case is PluginModule:
+                    try module.dependencies.compactMap {
+                        switch $0 {
+                        case .module(let moduleDependency, _):
+                            if moduleDependency.type == .executable {
+                                return graph.product(for: moduleDependency.name)
+                            }
+                            return nil
+                        default:
+                            return nil
+                        }
+                    }.forEach {
+                        try productMap.insert(ProductBuildDescription(
+                            package: package,
+                            product: $0,
+                            toolsVersion: package.manifest.toolsVersion,
+                            buildParameters: toolsBuildParameters,
+                            fileSystem: fileSystem,
+                            observabilityScope: planningObservabilityScope
+                        ))
+                    }
+
+                    try pluginDescriptions.append(PluginBuildDescription(
+                        module: module,
+                        products: package.products.filter { $0.modules.contains(id: module.id) },
+                        package: package,
+                        toolsVersion: package.manifest.toolsVersion,
+                        fileSystem: fileSystem
+                    ))
+                case is SystemLibraryModule, is BinaryModule:
+                    break
+                default:
+                    throw InternalError("unhandled \(module.underlying)")
+                }
             }
-        }
+        )
 
         /// Ensure we have at least one buildable target.
         guard !targetMap.isEmpty else {
@@ -438,39 +457,42 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
         }
 
         // Abort now if we have any diagnostics at this point.
-        guard !self.observabilityScope.errorsReported else {
+        guard !planningObservabilityScope.errorsReported else {
             throw Diagnostics.fatalError
         }
 
+        self.observabilityScope = observabilityScope.makeChildScope(description: "Build Plan")
+
         // Plan the derived test targets, if necessary.
-        if destinationBuildParameters.testingParameters.testProductStyle.requiresAdditionalDerivedTestTargets {
-            let derivedTestTargets = try Self.makeDerivedTestTargets(
-                testProducts: productMap.values.filter {
-                    $0.product.type == .test
-                },
-                destinationBuildParameters: destinationBuildParameters,
-                toolsBuildParameters: toolsBuildParameters,
-                shouldDisableSandbox: self.shouldDisableSandbox,
-                self.fileSystem,
-                self.observabilityScope
-            )
-            for item in derivedTestTargets {
-                var derivedTestTargets = [item.entryPointTargetBuildDescription.target]
+        let derivedTestTargets = try Self.makeDerivedTestTargets(
+            testProducts: productMap.filter {
+                $0.product.type == .test
+            },
+            destinationBuildParameters: destinationBuildParameters,
+            toolsBuildParameters: toolsBuildParameters,
+            shouldDisableSandbox: self.shouldDisableSandbox,
+            self.fileSystem,
+            self.observabilityScope
+        )
+        for item in derivedTestTargets {
+            var derivedTestTargets = [item.entryPointTargetBuildDescription.target]
 
-                targetMap[item.entryPointTargetBuildDescription.target.id] = .swift(
-                    item.entryPointTargetBuildDescription
-                )
+            targetMap.insert(.swift(
+                item.entryPointTargetBuildDescription
+            ))
 
-                if let discoveryTargetBuildDescription = item.discoveryTargetBuildDescription {
-                    targetMap[discoveryTargetBuildDescription.target.id] = .swift(discoveryTargetBuildDescription)
-                    derivedTestTargets.append(discoveryTargetBuildDescription.target)
-                }
-
-                self.derivedTestTargetsMap[item.product.id] = derivedTestTargets
+            if let discoveryTargetBuildDescription = item.discoveryTargetBuildDescription {
+                targetMap.insert(.swift(discoveryTargetBuildDescription))
+                derivedTestTargets.append(discoveryTargetBuildDescription.target)
             }
+
+            self.derivedTestTargetsMap[item.product.id] = derivedTestTargets
         }
 
-        self.productMap = productMap.mapValues(\.buildDescription)
+        self.buildToolPluginInvocationResults = buildToolPluginInvocationResults
+        self.prebuildCommandResults = prebuildCommandResults
+
+        self.productMap = productMap
         self.targetMap = targetMap
         self.pluginDescriptions = pluginDescriptions
 
@@ -527,6 +549,16 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
         // FIXME: We need to find out if any product has a target on which it depends
         // both static and dynamically and then issue a suitable diagnostic or auto
         // handle that situation.
+
+        // Ensure modules in Windows DLLs export their symbols
+        for product in productMap.values where product.product.type == .library(.dynamic) && product.buildParameters.triple.isWindows() {
+            for target in product.product.modules {
+                let targetId: ModuleBuildDescription.ID = .init(moduleID: target.id, destination: product.buildParameters.destination)
+                if case let .swift(buildDescription) = targetMap[targetId] {
+                    buildDescription.isWindowsStatic = false
+                }
+            }
+        }
     }
 
     public func createAPIToolCommonArgs(includeLibrarySearchPaths: Bool) throws -> [String] {
@@ -561,6 +593,7 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
                 if let includeDir = targetDescription.moduleMap?.parentDirectory {
                     arguments += ["-I", includeDir.pathString]
                 }
+                arguments += ["-I", targetDescription.clangTarget.includeDir.pathString]
             }
         }
 
@@ -588,7 +621,7 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
         arguments.append("-l" + replProductName)
 
         // The graph should have the REPL product.
-        assert(self.graph.product(for: replProductName, destination: .destination) != nil)
+        assert(self.graph.product(for: replProductName) != nil)
 
         // Add the search path to the directory containing the modulemap file.
         for target in self.targets {
@@ -654,15 +687,6 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
         }
     }
 
-    /// Determines the arguments needed to run `swift-symbolgraph-extract` for
-    /// a particular module.
-    public func symbolGraphExtractArguments(for module: ResolvedModule) throws -> [String] {
-        guard let description = self.targetMap[module.id] else {
-            throw InternalError("Expected description for module \(module)")
-        }
-        return try description.symbolGraphExtractArguments()
-    }
-
     /// Returns the files and directories that affect the build process of this build plan.
     package var inputs: [Input] {
         var inputs: [Input] = []
@@ -689,6 +713,500 @@ public class BuildPlan: SPMBuildCore.BuildPlan {
 
         }
         return inputs
+    }
+
+    public func description(
+        for product: ResolvedProduct,
+        context: BuildParameters.Destination
+    ) -> ProductBuildDescription? {
+        let destination: BuildParameters.Destination = switch product.type {
+        case .macro, .plugin:
+            .host
+        default:
+            context
+        }
+
+        return self.productMap[.init(productID: product.id, destination: destination)]
+    }
+
+    public func description(
+        for module: ResolvedModule,
+        context: BuildParameters.Destination
+    ) -> ModuleBuildDescription? {
+        let destination: BuildParameters.Destination = switch module.type {
+        case .macro, .plugin:
+            .host
+        default:
+            context
+        }
+
+        return self.targetMap[.init(moduleID: module.id, destination: destination)]
+    }
+}
+
+extension BuildPlan {
+    /// Applies plugins to the given module as needed. Each plugin is passed an input context that provides
+    /// information about the module to which it is being applied (along with some information about that
+    /// module's dependency closure). The plugin is expected to generate an output in the form of commands
+    /// that will later be run before or during the build, and can also emit debug output and diagnostics.
+    ///
+    /// Each result returned by this function includes an ordered list of commands to run before the build
+    /// of the module, and another list of the commands to incorporate into the build graph so they run
+    /// at the appropriate times during the build.
+    ///
+    /// Any warnings and errors related to running the plugin will be emitted to `diagnostics` when
+    /// `surfaceDiagnostics` parameter is set to `true`.
+    ///
+    /// Note that warnings emitted by the the plugin itself will be returned in the `BuildToolPluginInvocationResult`
+    /// structures for later showing to the user, and not added directly to the diagnostics engine.
+    static func invokeBuildToolPlugins(
+        for module: ResolvedModule,
+        destination: BuildParameters.Destination,
+        configuration: PluginConfiguration,
+        buildParameters: BuildParameters,
+        modulesGraph: ModulesGraph,
+        tools: [ResolvedModule.ID: [String: PluginTool]],
+        additionalFileRules: [FileRuleDescription],
+        pkgConfigDirectories: [AbsolutePath],
+        fileSystem: any FileSystem,
+        observabilityScope: ObservabilityScope,
+        surfaceDiagnostics: Bool = false
+    ) async throws -> [BuildToolPluginInvocationResult] {
+        let outputDir = configuration.workDirectory.appending("outputs")
+
+        /// Determine the package that contains the target.
+        guard let package = modulesGraph.package(for: module) else {
+            throw InternalError("could not determine package for module \(self)")
+        }
+
+        // Apply each build tool plugin used by the target in order,
+        // creating a list of results (one for each plugin usage).
+        var buildToolPluginResults: [BuildToolPluginInvocationResult] = []
+        for plugin in module.pluginDependencies(satisfying: buildParameters.buildEnvironment) {
+            let pluginModule = plugin.underlying as! PluginModule
+
+            // Determine the tools to which this plugin has access, and create a name-to-path mapping from tool
+            // names to the corresponding paths. Built tools are assumed to be in the build tools directory.
+            guard let accessibleTools = tools[plugin.id] else {
+                throw InternalError("No tools found for plugin \(plugin.name)")
+            }
+
+            // Assign a plugin working directory based on the package, target, and plugin.
+            let pluginOutputDir = outputDir.appending(
+                components: [
+                    package.identity.description,
+                    module.name,
+                    destination == .host ? "tools" : "destination",
+                    plugin.name,
+                ]
+            )
+
+            // Determine the set of directories under which plugins are allowed to write.
+            // We always include just the output directory, and for now there is no possibility
+            // of opting into others.
+            let writableDirectories = [outputDir]
+
+            // Determine a set of further directories under which plugins are never allowed
+            // to write, even if they are covered by other rules (such as being able to write
+            // to the temporary directory).
+            let readOnlyDirectories = [package.path]
+
+            // In tools version 6.0 and newer, we vend the list of files generated by previous plugins.
+            let pluginDerivedSources: Sources
+            let pluginDerivedResources: [Resource]
+            if package.manifest.toolsVersion >= .v6_0 {
+                // Set up dummy observability because we don't want to emit diagnostics for this before the actual
+                // build.
+                let observability = ObservabilitySystem { _, _ in }
+                // Compute the generated files based on all results we have computed so far.
+                (pluginDerivedSources, pluginDerivedResources) = ModulesGraph.computePluginGeneratedFiles(
+                    target: module,
+                    toolsVersion: package.manifest.toolsVersion,
+                    additionalFileRules: additionalFileRules,
+                    buildParameters: buildParameters,
+                    buildToolPluginInvocationResults: buildToolPluginResults,
+                    prebuildCommandResults: [],
+                    observabilityScope: observability.topScope
+                )
+            } else {
+                pluginDerivedSources = .init(paths: [], root: package.path)
+                pluginDerivedResources = []
+            }
+
+            let result = try await pluginModule.invoke(
+                module: plugin,
+                action: .createBuildToolCommands(
+                    package: package,
+                    target: module,
+                    pluginGeneratedSources: pluginDerivedSources.paths,
+                    pluginGeneratedResources: pluginDerivedResources.map(\.path)
+                ),
+                buildEnvironment: buildParameters.buildEnvironment,
+                scriptRunner: configuration.scriptRunner,
+                workingDirectory: package.path,
+                outputDirectory: pluginOutputDir,
+                toolSearchDirectories: [buildParameters.toolchain.swiftCompilerPath.parentDirectory],
+                accessibleTools: accessibleTools,
+                writableDirectories: writableDirectories,
+                readOnlyDirectories: readOnlyDirectories,
+                allowNetworkConnections: [],
+                pkgConfigDirectories: pkgConfigDirectories,
+                sdkRootPath: buildParameters.toolchain.sdkRootPath,
+                fileSystem: fileSystem,
+                modulesGraph: modulesGraph,
+                observabilityScope: observabilityScope
+            )
+
+
+            if surfaceDiagnostics {
+                let diagnosticsEmitter = observabilityScope.makeDiagnosticsEmitter {
+                    var metadata = ObservabilityMetadata()
+                    metadata.moduleName = module.name
+                    metadata.pluginName = result.plugin.name
+                    return metadata
+                }
+
+                for line in result.textOutput.split(whereSeparator: { $0.isNewline }) {
+                    diagnosticsEmitter.emit(info: line)
+                }
+
+                for diag in result.diagnostics {
+                    diagnosticsEmitter.emit(diag)
+                }
+            }
+
+            // Add a BuildToolPluginInvocationResult to the mapping.
+            buildToolPluginResults.append(result)
+        }
+
+        return buildToolPluginResults
+    }
+
+    /// Runs any command plugins associated with the given list of plugin invocation results,
+    /// in order, and returns the results of running those prebuild commands.
+    fileprivate static func runCommandPlugins(
+        using pluginConfiguration: PluginConfiguration,
+        for pluginResults: [BuildToolPluginInvocationResult],
+        fileSystem: any FileSystem,
+        observabilityScope: ObservabilityScope
+    ) throws -> [CommandPluginResult] {
+        // Run through all the commands from all the plugin usages in the target.
+        try pluginResults.map { pluginResult in
+            // As we go we will collect a list of prebuild output directories whose contents should be input to the
+            // build, and a list of the files in those directories after running the commands.
+            var derivedFiles: [AbsolutePath] = []
+            var prebuildOutputDirs: [AbsolutePath] = []
+            for command in pluginResult.prebuildCommands {
+                observabilityScope
+                    .emit(
+                        info: "Running " +
+                            (command.configuration.displayName ?? command.configuration.executable.basename)
+                    )
+
+                // Run the command configuration as a subshell. This doesn't return until it is done.
+                // TODO: We need to also use any working directory, but that support isn't yet available on all platforms at a lower level.
+                var commandLine = [command.configuration.executable.pathString] + command.configuration.arguments
+                if !pluginConfiguration.disableSandbox {
+                    commandLine = try Sandbox.apply(
+                        command: commandLine,
+                        fileSystem: fileSystem,
+                        strictness: .writableTemporaryDirectory,
+                        writableDirectories: [pluginResult.pluginOutputDirectory]
+                    )
+                }
+                let processResult = try AsyncProcess.popen(
+                    arguments: commandLine,
+                    environment: command.configuration.environment
+                )
+                let output = try processResult.utf8Output() + processResult.utf8stderrOutput()
+                if processResult.exitStatus != .terminated(code: 0) {
+                    throw StringError("failed: \(command)\n\n\(output)")
+                }
+
+                // Add any files found in the output directory declared for the prebuild command after the command ends.
+                let outputFilesDir = command.outputFilesDirectory
+                if let swiftFiles = try? fileSystem.getDirectoryContents(outputFilesDir).sorted() {
+                    derivedFiles.append(contentsOf: swiftFiles.map { outputFilesDir.appending(component: $0) })
+                }
+
+                // Add the output directory to the list of directories whose structure should affect the build plan.
+                prebuildOutputDirs.append(outputFilesDir)
+            }
+
+            // Add the results of running any prebuild commands for this invocation.
+            return CommandPluginResult(derivedFiles: derivedFiles, outputDirectories: prebuildOutputDirs)
+        }
+    }
+}
+
+extension BuildPlan {
+    fileprivate typealias Destination = BuildParameters.Destination
+
+    enum TraversalNode: Hashable {
+        case package(ResolvedPackage)
+        case product(ResolvedProduct, BuildParameters.Destination)
+        case module(ResolvedModule, BuildParameters.Destination)
+
+        var destination: BuildParameters.Destination {
+            switch self {
+            case .package:
+                .target
+            case .product(_, let destination):
+                destination
+            case .module(_, let destination):
+                destination
+            }
+        }
+
+        init(
+            product: ResolvedProduct,
+            context destination: BuildParameters.Destination
+        ) {
+            switch product.type {
+            case .macro, .plugin:
+                self = .product(product, .host)
+            case .test:
+                self = .product(product, product.hasDirectMacroDependencies ? .host : destination)
+            default:
+                self = .product(product, destination)
+            }
+        }
+
+        init(
+            module: ResolvedModule,
+            context destination: BuildParameters.Destination
+        ) {
+            switch module.type {
+            case .macro, .plugin:
+                // Macros and plugins are ways built for host
+                self = .module(module, .host)
+            case .test:
+                self = .module(module, module.hasDirectMacroDependencies ? .host : destination)
+            default:
+                // By default assume the destination of the context.
+                // This means that i.e. test products that reference macros
+                // would force all of their successors to be `host`
+                self = .module(module, destination)
+            }
+        }
+    }
+
+    /// Traverse the modules graph and find a destination for every product and module.
+    /// All non-macro/plugin products and modules have `target` destination with one
+    /// notable exception - test products/modules with direct macro dependency.
+    fileprivate static func computeDestinations(
+        graph: ModulesGraph,
+        onProduct: (ResolvedProduct, Destination) throws -> Void,
+        onModule: (ResolvedModule, Destination) async throws -> Void
+    ) async rethrows {
+        func successors(for package: ResolvedPackage) -> [TraversalNode] {
+            var successors: [TraversalNode] = []
+            for product in package.products {
+                if case .test = product.underlying.type,
+                   !graph.rootPackages.contains(id: package.id)
+                {
+                    continue
+                }
+
+                successors.append(.init(product: product, context: .target))
+            }
+
+            for module in package.modules {
+                // Tests are discovered through an aggregate product which also
+                // informs their destination.
+                if case .test = module.underlying.type {
+                    continue
+                }
+
+                successors.append(.init(module: module, context: .target))
+            }
+
+            return successors
+        }
+
+        func successors(
+            for product: ResolvedProduct,
+            destination: Destination
+        ) -> [TraversalNode] {
+            guard destination == .host || product.underlying.type == .test else {
+                return []
+            }
+
+            return product.modules.map { module in
+                TraversalNode(module: module, context: destination)
+            }
+        }
+
+        func successors(
+            for module: ResolvedModule,
+            destination: Destination
+        ) -> [TraversalNode] {
+            guard destination == .host else {
+                return []
+            }
+
+            return module.dependencies.reduce(into: [TraversalNode]()) { partial, dependency in
+                switch dependency {
+                case .product(let product, conditions: _):
+                    partial.append(.init(product: product, context: destination))
+                case .module(let module, _):
+                    partial.append(.init(module: module, context: destination))
+                }
+            }
+        }
+
+        try await depthFirstSearch(graph.packages.map { TraversalNode.package($0) }) { node in
+            switch node {
+            case .package(let package):
+                successors(for: package)
+            case .product(let product, let destination):
+                successors(for: product, destination: destination)
+            case .module(let module, let destination):
+                successors(for: module, destination: destination)
+            }
+        } onUnique: {
+            switch $0 {
+            case .package:
+                break
+            case .product(let product, let destination):
+                try onProduct(product, destination)
+
+            case .module(let module, let destination):
+                try await onModule(module, destination)
+            }
+        } onDuplicate: { _, _ in
+            // No de-duplication is necessary we only want unique nodes.
+        }
+    }
+
+    /// Traverses the modules graph, computes destination of every module reference and
+    /// provides the data to the caller by means of `onModule` callback. The products
+    /// are completely transparent to this method and are represented by their module dependencies.
+    package func traverseModules(
+        _ onModule: (
+            (ResolvedModule, BuildParameters.Destination),
+            _ parent: (ResolvedModule, BuildParameters.Destination)?
+        ) -> Void
+    ) {
+        var visited = Set<TraversalNode>()
+
+        func successors(for package: ResolvedPackage) -> [TraversalNode] {
+            guard visited.insert(.package(package)).inserted else {
+                return []
+            }
+            return package.modules.compactMap {
+                if case .test = $0.underlying.type,
+                   !self.graph.rootPackages.contains(id: package.id)
+                {
+                    return nil
+                }
+                return .init(module: $0, context: .target)
+            }
+        }
+
+        func successors(
+            for module: ResolvedModule,
+            destination: Destination
+        ) -> [TraversalNode] {
+            guard visited.insert(.module(module, destination)).inserted else {
+                return []
+            }
+            return module.dependencies.reduce(into: [TraversalNode]()) { partial, dependency in
+                switch dependency {
+                case .product(let product, conditions: _):
+                    let parent = TraversalNode(product: product, context: destination)
+                    for module in product.modules {
+                        partial.append(.init(module: module, context: parent.destination))
+                    }
+                case .module(let module, _):
+                    partial.append(.init(module: module, context: destination))
+                }
+            }
+        }
+
+        depthFirstSearch(self.graph.packages.map { TraversalNode.package($0) }) {
+            switch $0 {
+            case .package(let package):
+                successors(for: package)
+            case .module(let module, let destination):
+                successors(for: module, destination: destination)
+            case .product:
+                []
+            }
+        } onNext: { current, parent in
+            let parentModule: (ResolvedModule, BuildParameters.Destination)? = switch parent {
+            case .package, .product, nil:
+                nil
+            case .module(let module, let destination):
+                (module, destination)
+            }
+
+            switch current {
+            case .package, .product:
+                break
+
+            case .module(let module, let destination):
+                onModule((module, destination), parentModule)
+            }
+        }
+    }
+
+    package func traverseDependencies(
+        of description: ModuleBuildDescription,
+        onProduct: (ResolvedProduct, BuildParameters.Destination, ProductBuildDescription?) -> Void,
+        onModule: (ResolvedModule, BuildParameters.Destination, ModuleBuildDescription?) -> Void
+    ) {
+        var visited = Set<TraversalNode>()
+        func successors(
+            for product: ResolvedProduct,
+            destination: Destination
+        ) -> [TraversalNode] {
+            product.modules.map { module in
+                TraversalNode(module: module, context: destination)
+            }.filter {
+                visited.insert($0).inserted
+            }
+        }
+
+        func successors(
+            for module: ResolvedModule,
+            destination: Destination
+        ) -> [TraversalNode] {
+            module
+                .dependencies(satisfying: description.buildParameters.buildEnvironment)
+                .reduce(into: [TraversalNode]()) { partial, dependency in
+                    switch dependency {
+                    case .product(let product, _):
+                        partial.append(.init(product: product, context: destination))
+                    case .module(let module, _):
+                        partial.append(.init(module: module, context: destination))
+                    }
+                }.filter {
+                    visited.insert($0).inserted
+                }
+        }
+
+        depthFirstSearch(successors(for: description.module, destination: description.destination)) {
+            switch $0 {
+            case .module(let module, let destination):
+                successors(for: module, destination: destination)
+            case .product(let product, let destination):
+                successors(for: product, destination: destination)
+            case .package:
+                []
+            }
+        } onNext: { module, _ in
+            switch module {
+            case .package:
+                break
+
+            case .product(let product, let destination):
+                onProduct(product, destination, self.description(for: product, context: destination))
+
+            case .module(let module, let destination):
+                onModule(module, destination, self.description(for: module, context: destination))
+            }
+        }
     }
 }
 

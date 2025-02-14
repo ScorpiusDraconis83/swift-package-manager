@@ -13,7 +13,6 @@
 import Foundation
 
 import protocol TSCBasic.Closable
-import class TSCBasic.InMemoryFileSystem
 import var TSCBasic.localFileSystem
 
 /// SQLite backed persistent cache.
@@ -239,7 +238,7 @@ package final class SQLiteBackedCache<Value: Codable>: Closable {
         switch self.location {
         case .path(let path):
             if !self.fileSystem.exists(path.parentDirectory) {
-                try self.fileSystem.createDirectory(path.parentDirectory)
+                try self.fileSystem.createDirectory(path.parentDirectory, recursive: true)
             }
             return try self.fileSystem.withLock(on: path, type: .exclusive, body)
         case .memory, .temporary:

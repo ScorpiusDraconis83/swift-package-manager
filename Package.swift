@@ -72,27 +72,20 @@ let swiftPMProduct = (
 )
 
 #if os(Windows)
+let includeDynamicLibrary: Bool = false
 let systemSQLitePkgConfig: String? = nil
 #else
-let systemSQLitePkgConfig: String? = "sqlite3"
+let includeDynamicLibrary: Bool = true
+var systemSQLitePkgConfig: String? = "sqlite3"
+if ProcessInfo.processInfo.environment["SWIFTCI_INSTALL_RPATH_OS"] == "android" {
+    systemSQLitePkgConfig = nil
+}
 #endif
 
 /** An array of products which have two versions listed: one dynamically linked, the other with the
  automatic linking type with `-auto` suffix appended to product's name.
  */
 let autoProducts = [swiftPMProduct, swiftPMDataModelProduct]
-
-let packageModelResourcesSettings: [SwiftSetting]
-let packageModelResources: [Resource]
-if ProcessInfo.processInfo.environment["SWIFTPM_USE_LIBRARIES_METADATA"] == nil {
-    packageModelResources = []
-    packageModelResourcesSettings = [.define("SKIP_RESOURCE_SUPPORT")]
-} else {
-    packageModelResources = [
-        .copy("InstalledLibrariesSupport/provided-libraries.json"),
-    ]
-    packageModelResourcesSettings = []
-}
 
 let package = Package(
     name: "SwiftPM",
@@ -102,12 +95,15 @@ let package = Package(
     ],
     products:
     autoProducts.flatMap {
-        [
+        (includeDynamicLibrary ? [
             .library(
                 name: $0.name,
                 type: .dynamic,
                 targets: $0.targets
             ),
+        ] : [])
+        +
+        [
             .library(
                 name: "\($0.name)-auto",
                 targets: $0.targets
@@ -179,6 +175,7 @@ let package = Package(
             exclude: ["CMakeLists.txt"],
             swiftSettings: [
                 .enableExperimentalFeature("AccessLevelOnImport"),
+                .unsafeFlags(["-static"]),
             ]
         ),
 
@@ -187,9 +184,25 @@ let package = Package(
         .systemLibrary(name: "SPMSQLite3", pkgConfig: systemSQLitePkgConfig),
 
         .target(
+            name: "_AsyncFileSystem",
+            dependencies: [
+                .product(name: "SystemPackage", package: "swift-system"),
+            ],
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .enableExperimentalFeature("StrictConcurrency"),
+                .enableExperimentalFeature("AccessLevelOnImport"),
+                .enableExperimentalFeature("InternalImportsByDefault"),
+                .unsafeFlags(["-static"]),
+            ]
+        ),
+
+        .target(
             name: "Basics",
             dependencies: [
-                "SPMSQLite3",
+                "_AsyncFileSystem",
+                .target(name: "SPMSQLite3", condition: .when(platforms: [.macOS, .iOS, .tvOS, .watchOS, .visionOS, .macCatalyst, .linux])),
+                .product(name: "SwiftToolchainCSQLite", package: "swift-toolchain-sqlite", condition: .when(platforms: [.windows, .android])),
                 .product(name: "DequeModule", package: "swift-collections"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
                 .product(name: "SwiftToolsSupport-auto", package: "swift-tools-support-core"),
@@ -199,6 +212,7 @@ let package = Package(
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency"),
                 .enableExperimentalFeature("AccessLevelOnImport"),
+                .unsafeFlags(["-static"]),
             ]
         ),
 
@@ -206,7 +220,10 @@ let package = Package(
             /** The llbuild manifest model */
             name: "LLBuildManifest",
             dependencies: ["Basics"],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
@@ -219,7 +236,10 @@ let package = Package(
                 "PackageModel",
                 "PackageSigning",
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
@@ -229,14 +249,20 @@ let package = Package(
                 "Basics",
                 "PackageModel",
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
             /** Shim for llbuild library */
             name: "SPMLLBuild",
             dependencies: ["Basics"],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         // MARK: Project Model
@@ -246,8 +272,9 @@ let package = Package(
             name: "PackageModel",
             dependencies: ["Basics"],
             exclude: ["CMakeLists.txt", "README.md"],
-            resources: packageModelResources,
-            swiftSettings: packageModelResourcesSettings
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
@@ -257,14 +284,11 @@ let package = Package(
                 "Basics",
                 "PackageLoading",
                 "PackageModel",
-                .product(name: "SwiftBasicFormat", package: "swift-syntax"),
-                .product(name: "SwiftDiagnostics", package: "swift-syntax"),
-                .product(name: "SwiftIDEUtils", package: "swift-syntax"),
-                .product(name: "SwiftParser", package: "swift-syntax"),
-                .product(name: "SwiftSyntax", package: "swift-syntax"),
-                .product(name: "SwiftSyntaxBuilder", package: "swift-syntax"),
-            ],
-            exclude: ["CMakeLists.txt"]
+            ] + swiftSyntaxDependencies(["SwiftBasicFormat", "SwiftDiagnostics", "SwiftIDEUtils", "SwiftParser", "SwiftSyntax", "SwiftSyntaxBuilder"]),
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
@@ -275,7 +299,10 @@ let package = Package(
                 "PackageModel",
                 "SourceControl",
             ],
-            exclude: ["CMakeLists.txt", "README.md"]
+            exclude: ["CMakeLists.txt", "README.md"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         // MARK: Package Dependency Resolution
@@ -287,8 +314,12 @@ let package = Package(
                 "Basics",
                 "PackageLoading",
                 "PackageModel",
+                .product(name: "OrderedCollections", package: "swift-collections"),
             ],
-            exclude: ["CMakeLists.txt", "README.md"]
+            exclude: ["CMakeLists.txt", "README.md"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         // MARK: Package Collections
@@ -299,6 +330,9 @@ let package = Package(
             dependencies: [],
             exclude: [
                 "Formats/v1.md",
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
             ]
         ),
 
@@ -311,6 +345,9 @@ let package = Package(
                 "PackageCollectionsSigning",
                 "PackageModel",
                 "SourceControl",
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
             ]
         ),
 
@@ -321,6 +358,9 @@ let package = Package(
                 .product(name: "X509", package: "swift-certificates"),
                 "Basics",
                 "PackageCollectionsModel",
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
             ]
         ),
 
@@ -330,7 +370,10 @@ let package = Package(
                 "Basics",
                 "PackageModel",
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
@@ -341,7 +384,10 @@ let package = Package(
                 "Basics",
                 "PackageModel",
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         // MARK: Package Manager Functionality
@@ -352,8 +398,12 @@ let package = Package(
             dependencies: [
                 "Basics",
                 "PackageGraph",
+                .product(name: "OrderedCollections", package: "swift-collections"),
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
         .target(
             /** Builds Modules and Products */
@@ -365,9 +415,13 @@ let package = Package(
                 "SPMBuildCore",
                 "SPMLLBuild",
                 .product(name: "SwiftDriver", package: "swift-driver"),
+                .product(name: "OrderedCollections", package: "swift-collections"),
                 "DriverSupport",
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
         .target(
             name: "DriverSupport",
@@ -376,13 +430,23 @@ let package = Package(
                 "PackageModel",
                 .product(name: "SwiftDriver", package: "swift-driver"),
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
         .target(
             /** Support for building using Xcode's build system */
             name: "XCBuildSupport",
-            dependencies: ["DriverSupport", "SPMBuildCore", "PackageGraph"],
-            exclude: ["CMakeLists.txt"]
+            dependencies: [
+                "SPMBuildCore",
+                "PackageGraph",
+                .product(name: "OrderedCollections", package: "swift-collections"),
+            ],
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
         .target(
             /** High level functionality */
@@ -396,8 +460,12 @@ let package = Package(
                 "PackageSigning",
                 "SourceControl",
                 "SPMBuildCore",
+                .product(name: "OrderedCollections", package: "swift-collections"),
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
         .target(
             // ** High level interface for package discovery */
@@ -408,6 +476,9 @@ let package = Package(
                 "PackageModel",
                 "PackageRegistry",
                 "PackageSigning",
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
             ]
         ),
 
@@ -426,7 +497,10 @@ let package = Package(
                 "Workspace",
                 "XCBuildSupport",
             ],
-            exclude: ["CMakeLists.txt"]
+            exclude: ["CMakeLists.txt"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
@@ -435,7 +509,6 @@ let package = Package(
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
                 .product(name: "OrderedCollections", package: "swift-collections"),
-                .product(name: "SwiftIDEUtils", package: "swift-syntax"),
                 "Basics",
                 "Build",
                 "CoreCommands",
@@ -444,8 +517,11 @@ let package = Package(
                 "SourceControl",
                 "Workspace",
                 "XCBuildSupport",
-            ],
-            exclude: ["CMakeLists.txt", "README.md"]
+            ] + swiftSyntaxDependencies(["SwiftIDEUtils"]),
+            exclude: ["CMakeLists.txt", "README.md"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
@@ -458,7 +534,10 @@ let package = Package(
                 "SPMBuildCore",
                 "PackageModel",
             ],
-            exclude: ["CMakeLists.txt", "README.md"]
+            exclude: ["CMakeLists.txt", "README.md"],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         .target(
@@ -471,6 +550,9 @@ let package = Package(
                 "CoreCommands",
                 "PackageCollections",
                 "PackageModel",
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
             ]
         ),
 
@@ -490,17 +572,22 @@ let package = Package(
                 "SourceControl",
                 "SPMBuildCore",
                 "Workspace",
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
             ]
         ),
 
         .target(
             name: "QueryEngine",
             dependencies: [
+                "_AsyncFileSystem",
                 "Basics",
                 .product(name: "Crypto", package: "swift-crypto"),
             ],
             swiftSettings: [
                 .enableExperimentalFeature("StrictConcurrency=complete"),
+                .unsafeFlags(["-static"]),
             ]
         ),
 
@@ -521,6 +608,7 @@ let package = Package(
             name: "swift-bootstrap",
             dependencies: [
                 .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                .product(name: "OrderedCollections", package: "swift-collections"),
                 "Basics",
                 "Build",
                 "PackageGraph",
@@ -576,6 +664,15 @@ let package = Package(
             name: "swift-package-registry",
             dependencies: ["Commands", "PackageRegistryCommand"]
         ),
+        .executableTarget(
+            /** Utility to produce the artifacts for prebuilts */
+            name: "swift-build-prebuilts",
+            dependencies: [
+                .product(name: "ArgumentParser", package: "swift-argument-parser"),
+                "Basics",
+                "Workspace",
+            ]
+        ),
 
         // MARK: Support for Swift macros, should eventually move to a plugin-based solution
 
@@ -591,12 +688,24 @@ let package = Package(
 
         // MARK: Additional Test Dependencies
 
+            .target(
+                /** SwiftPM internal build test suite support library */
+                name: "_InternalBuildTestSupport",
+                dependencies: [
+                    "Build",
+                    "XCBuildSupport",
+                    "_InternalTestSupport"
+                ],
+                swiftSettings: [
+                    .unsafeFlags(["-static"]),
+                ]
+            ),
+
         .target(
             /** SwiftPM internal test suite support library */
             name: "_InternalTestSupport",
             dependencies: [
                 "Basics",
-                "Build",
                 "PackageFingerprint",
                 "PackageGraph",
                 "PackageLoading",
@@ -604,18 +713,32 @@ let package = Package(
                 "PackageSigning",
                 "SourceControl",
                 .product(name: "TSCTestSupport", package: "swift-tools-support-core"),
+                .product(name: "OrderedCollections", package: "swift-collections"),
                 "Workspace",
-                "XCBuildSupport",
+            ],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
             ]
         ),
 
         .target(
-            /** Test for thread-santizer. */
+            /** Test for thread-sanitizer. */
             name: "tsan_utils",
-            dependencies: []
+            dependencies: [],
+            swiftSettings: [
+                .unsafeFlags(["-static"]),
+            ]
         ),
 
         // MARK: SwiftPM tests
+
+        .testTarget(
+            name: "_AsyncFileSystemTests",
+            dependencies: [
+                "_AsyncFileSystem",
+                "_InternalTestSupport",
+            ]
+        ),
 
         .testTarget(
             name: "SourceKitLSPAPITests",
@@ -633,11 +756,17 @@ let package = Package(
                 "Archiver/Inputs/archive.zip",
                 "Archiver/Inputs/invalid_archive.tar.gz",
                 "Archiver/Inputs/invalid_archive.zip",
+                "processInputs/long-stdout-stderr",
+                "processInputs/exit4",
+                "processInputs/simple-stdout-stderr",
+                "processInputs/deadlock-if-blocking-io",
+                "processInputs/echo",
+                "processInputs/in-to-out",
             ]
         ),
         .testTarget(
             name: "BuildTests",
-            dependencies: ["Build", "PackageModel", "_InternalTestSupport"]
+            dependencies: ["Build", "PackageModel", "Commands", "_InternalTestSupport", "_InternalBuildTestSupport"]
         ),
         .testTarget(
             name: "LLBuildManifestTests",
@@ -669,8 +798,7 @@ let package = Package(
             dependencies: [
                 "PackageModelSyntax",
                 "_InternalTestSupport",
-                .product(name: "SwiftIDEUtils", package: "swift-syntax"),
-            ]
+            ] + swiftSyntaxDependencies(["SwiftIDEUtils"])
         ),
         .testTarget(
             name: "PackageGraphTests",
@@ -725,7 +853,7 @@ let package = Package(
         ),
         .testTarget(
             name: "XCBuildSupportTests",
-            dependencies: ["XCBuildSupport", "_InternalTestSupport"],
+            dependencies: ["XCBuildSupport", "_InternalTestSupport", "_InternalBuildTestSupport"],
             exclude: ["Inputs/Foo.pc"]
         ),
         // Examples (These are built to ensure they stay up to date with the API.)
@@ -738,7 +866,15 @@ let package = Package(
     swiftLanguageVersions: [.v5]
 )
 
-// Workaround SPM's attempt to link in executables which does not work on all
+#if canImport(Darwin)
+package.targets.append(contentsOf: [
+    .executableTarget(
+        name: "swiftpm-testing-helper"
+    )
+])
+#endif
+
+// Workaround SwiftPM's attempt to link in executables which does not work on all
 // platforms.
 #if !os(Windows)
 package.targets.append(contentsOf: [
@@ -770,7 +906,12 @@ if ProcessInfo.processInfo.environment["SWIFTCI_DISABLE_SDK_DEPENDENT_TESTS"] ==
                 "Basics",
             ]
         ),
-
+        .testTarget(
+            name: "_InternalTestSupportTests",
+            dependencies: [
+                "_InternalTestSupport"
+            ]
+        ),
         .testTarget(
             name: "CommandsTests",
             dependencies: [
@@ -790,6 +931,23 @@ if ProcessInfo.processInfo.environment["SWIFTCI_DISABLE_SDK_DEPENDENT_TESTS"] ==
     ])
 }
 #endif
+
+/// Whether swift-syntax is being built as a single dynamic library instead of as a separate library per module.
+///
+/// This means that the swift-syntax symbols don't need to be statically linked, which allows us to stay below the
+/// maximum number of exported symbols on Windows, in turn allowing us to build sourcekit-lsp using SwiftPM on Windows
+/// and run its tests.
+var buildDynamicSwiftSyntaxLibrary: Bool {
+  ProcessInfo.processInfo.environment["SWIFTSYNTAX_BUILD_DYNAMIC_LIBRARY"] != nil
+}
+
+func swiftSyntaxDependencies(_ names: [String]) -> [Target.Dependency] {
+  if buildDynamicSwiftSyntaxLibrary {
+    return [.product(name: "_SwiftSyntaxDynamic", package: "swift-syntax")]
+  } else {
+    return names.map { .product(name: $0, package: "swift-syntax") }
+  }
+}
 
 // Add package dependency on llbuild when not bootstrapping.
 //
@@ -826,13 +984,14 @@ if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == nil {
         // The 'swift-argument-parser' version declared here must match that
         // used by 'swift-driver' and 'sourcekit-lsp'. Please coordinate
         // dependency version changes here with those projects.
-        .package(url: "https://github.com/apple/swift-argument-parser.git", .upToNextMinor(from: "1.2.2")),
+        .package(url: "https://github.com/apple/swift-argument-parser.git", .upToNextMinor(from: "1.4.0")),
         .package(url: "https://github.com/apple/swift-driver.git", branch: relatedDependenciesBranch),
         .package(url: "https://github.com/apple/swift-crypto.git", .upToNextMinor(from: "3.0.0")),
         .package(url: "https://github.com/swiftlang/swift-syntax.git", branch: relatedDependenciesBranch),
-        .package(url: "https://github.com/apple/swift-system.git", "1.1.1" ..< "1.4.0"),
+        .package(url: "https://github.com/apple/swift-system.git", from: "1.1.1"),
         .package(url: "https://github.com/apple/swift-collections.git", "1.0.1" ..< "1.2.0"),
-        .package(url: "https://github.com/apple/swift-certificates.git", "1.0.1" ..< "1.4.0"),
+        .package(url: "https://github.com/apple/swift-certificates.git", "1.0.1" ..< "1.6.0"),
+        .package(url: "https://github.com/swiftlang/swift-toolchain-sqlite.git", from: "1.0.0"),
     ]
 } else {
     package.dependencies += [
@@ -844,5 +1003,6 @@ if ProcessInfo.processInfo.environment["SWIFTCI_USE_LOCAL_DEPS"] == nil {
         .package(path: "../swift-system"),
         .package(path: "../swift-collections"),
         .package(path: "../swift-certificates"),
+        .package(path: "../swift-toolchain-sqlite"),
     ]
 }

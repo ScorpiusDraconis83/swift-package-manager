@@ -11,20 +11,19 @@
 //===----------------------------------------------------------------------===//
 
 import struct Basics.InternalError
+
 import class PackageModel.BinaryModule
 import class PackageModel.ClangModule
 import class PackageModel.SystemLibraryModule
-import class PackageModel.ProvidedLibraryModule
 
 extension BuildPlan {
     func plan(swiftTarget: SwiftModuleBuildDescription) throws {
         // We need to iterate recursive dependencies because Swift compiler needs to see all the targets a target
         // depends on.
-        let environment = swiftTarget.buildParameters.buildEnvironment
-        for case .module(let dependency, _) in try swiftTarget.target.recursiveDependencies(satisfying: environment) {
+        for case .module(let dependency, let description) in swiftTarget.recursiveDependencies(using: self) {
             switch dependency.underlying {
             case let underlyingTarget as ClangModule where underlyingTarget.type == .library:
-                guard case let .clang(target)? = targetMap[dependency.id] else {
+                guard case let .clang(target)? = description else {
                     throw InternalError("unexpected clang target \(underlyingTarget)")
                 }
                 // Add the path to modulemap of the dependency. Currently we require that all Clang targets have a
@@ -49,10 +48,6 @@ extension BuildPlan {
                         swiftTarget.libraryBinaryPaths.insert(library.libraryPath)
                     }
                 }
-            case let target as ProvidedLibraryModule:
-                swiftTarget.additionalFlags += [
-                    "-I", target.path.pathString
-                ]
             default:
                 break
             }

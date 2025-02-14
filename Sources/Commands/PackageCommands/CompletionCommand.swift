@@ -16,7 +16,7 @@ import CoreCommands
 import var TSCBasic.stdoutStream
 
 extension SwiftPackageCommand {
-    struct CompletionCommand: SwiftCommand {
+    struct CompletionCommand: AsyncSwiftCommand {
         static let configuration = CommandConfiguration(
             commandName: "completion-tool",
             abstract: "Completion command (for shell completions)"
@@ -49,10 +49,10 @@ extension SwiftPackageCommand {
         @OptionGroup(visibility: .hidden)
         var globalOptions: GlobalOptions
 
-        @Argument(help: "generate-bash-script | generate-zsh-script |\ngenerate-fish-script | list-dependencies | list-executables")
+        @Argument(help: "Type of completions to list")
         var mode: Mode
 
-        func run(_ swiftCommandState: SwiftCommandState) throws {
+        func run(_ swiftCommandState: SwiftCommandState) async throws {
             switch mode {
             case .generateBashScript:
                 let script = SwiftCommand.completionScript(for: .bash)
@@ -64,7 +64,7 @@ extension SwiftPackageCommand {
                 let script = SwiftCommand.completionScript(for: .fish)
                 print(script)
             case .listDependencies:
-                let graph = try swiftCommandState.loadPackageGraph()
+                let graph = try await swiftCommandState.loadPackageGraph()
                 // command's result output goes on stdout
                 // ie "swift package list-dependencies" should output to stdout
                 ShowDependencies.dumpDependenciesOf(
@@ -74,14 +74,14 @@ extension SwiftPackageCommand {
                     on: TSCBasic.stdoutStream
                 )
             case .listExecutables:
-                let graph = try swiftCommandState.loadPackageGraph()
+                let graph = try await swiftCommandState.loadPackageGraph()
                 let package = graph.rootPackages[graph.rootPackages.startIndex].underlying
-                let executables = package.modules.filter { $0.type == .executable }
+                let executables = package.products.filter { $0.type == .executable }
                 for executable in executables {
                     print(executable.name)
                 }
             case .listSnippets:
-                let graph = try swiftCommandState.loadPackageGraph()
+                let graph = try await swiftCommandState.loadPackageGraph()
                 let package = graph.rootPackages[graph.rootPackages.startIndex].underlying
                 let executables = package.modules.filter { $0.type == .snippet }
                 for executable in executables {

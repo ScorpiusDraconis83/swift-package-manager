@@ -10,6 +10,7 @@
 //
 //===----------------------------------------------------------------------===//
 
+import Basics
 import Build
 import SPMBuildCore
 import XCBuildSupport
@@ -29,19 +30,19 @@ private struct NativeBuildSystemFactory: BuildSystemFactory {
         cacheBuildManifest: Bool,
         productsBuildParameters: BuildParameters?,
         toolsBuildParameters: BuildParameters?,
-        packageGraphLoader: (() throws -> ModulesGraph)?,
+        packageGraphLoader: (() async throws -> ModulesGraph)?,
         outputStream: OutputByteStream?,
         logLevel: Diagnostic.Severity?,
         observabilityScope: ObservabilityScope?
-    ) throws -> any BuildSystem {
-        let rootPackageInfo = try swiftCommandState.getRootPackageInformation()
-        let testEntryPointPath = productsBuildParameters?.testingParameters.testProductStyle.explicitlySpecifiedEntryPointPath
+    ) async throws -> any BuildSystem {
+        _ = try await swiftCommandState.getRootPackageInformation()
+        let testEntryPointPath = productsBuildParameters?.testProductStyle.explicitlySpecifiedEntryPointPath
         return try BuildOperation(
             productsBuildParameters: try productsBuildParameters ?? self.swiftCommandState.productsBuildParameters,
             toolsBuildParameters: try toolsBuildParameters ?? self.swiftCommandState.toolsBuildParameters,
             cacheBuildManifest: cacheBuildManifest && self.swiftCommandState.canUseCachedBuildManifest(),
             packageGraphLoader: packageGraphLoader ?? {
-                try self.swiftCommandState.loadPackageGraph(
+                try await self.swiftCommandState.loadPackageGraph(
                     explicitProduct: explicitProduct,
                     traitConfiguration: traitConfiguration,
                     testEntryPointPath: testEntryPointPath
@@ -56,8 +57,6 @@ private struct NativeBuildSystemFactory: BuildSystemFactory {
             traitConfiguration: traitConfiguration,
             additionalFileRules: FileRuleDescription.swiftpmFileTypes,
             pkgConfigDirectories: self.swiftCommandState.options.locations.pkgConfigDirectories,
-            dependenciesByRootPackageIdentity: rootPackageInfo.dependencies,
-            targetsByRootPackageIdentity: rootPackageInfo.targets,
             outputStream: outputStream ?? self.swiftCommandState.outputStream,
             logLevel: logLevel ?? self.swiftCommandState.logLevel,
             fileSystem: self.swiftCommandState.fileSystem,
@@ -74,7 +73,7 @@ private struct XcodeBuildSystemFactory: BuildSystemFactory {
         cacheBuildManifest: Bool,
         productsBuildParameters: BuildParameters?,
         toolsBuildParameters: BuildParameters?,
-        packageGraphLoader: (() throws -> ModulesGraph)?,
+        packageGraphLoader: (() async throws -> ModulesGraph)?,
         outputStream: OutputByteStream?,
         logLevel: Diagnostic.Severity?,
         observabilityScope: ObservabilityScope?
@@ -82,7 +81,7 @@ private struct XcodeBuildSystemFactory: BuildSystemFactory {
         return try XcodeBuildSystem(
             buildParameters: productsBuildParameters ?? self.swiftCommandState.productsBuildParameters,
             packageGraphLoader: packageGraphLoader ?? {
-                try self.swiftCommandState.loadPackageGraph(
+                try await self.swiftCommandState.loadPackageGraph(
                     explicitProduct: explicitProduct
                 )
             },

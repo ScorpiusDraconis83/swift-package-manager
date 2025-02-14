@@ -40,7 +40,7 @@ public struct ResolvedPackage {
     public let products: [ResolvedProduct]
 
     /// The enabled traits of this package.
-    package let enabledTraits: Set<String>
+    public let enabledTraits: Set<String>
 
     /// The dependencies of the package.
     public let dependencies: [PackageIdentity]
@@ -54,7 +54,8 @@ public struct ResolvedPackage {
     /// If the given package's source is a registry release, this provides additional metadata and signature information.
     public let registryMetadata: RegistryReleaseMetadata?
 
-    private let platformVersionProvider: PlatformVersionProvider
+    @_spi(SwiftPMInternal)
+    public let platformVersionProvider: PlatformVersionProvider
 
     public init(
         underlying: Package,

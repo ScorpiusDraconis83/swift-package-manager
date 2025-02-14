@@ -247,7 +247,7 @@ extension ManifestLoaderProtocol {
         delegateQueue: DispatchQueue,
         callbackQueue: DispatchQueue
     ) async throws -> Manifest {
-        try await withCheckedThrowingContinuation {
+        try await withCheckedThrowingContinuation { continuation in
             self.load(
                 packagePath: packagePath,
                 packageIdentity: packageIdentity,
@@ -261,7 +261,9 @@ extension ManifestLoaderProtocol {
                 observabilityScope: observabilityScope,
                 delegateQueue: delegateQueue,
                 callbackQueue: callbackQueue,
-                completion: $0.resume(with:)
+                completion: {
+                  continuation.resume(with: $0)
+                }
             )
         }
     }
@@ -289,7 +291,6 @@ public final class ManifestLoader: ManifestLoaderProtocol {
     public var delegate: Delegate?
 
     private let databaseCacheDir: AbsolutePath?
-    private let sdkRootCache = ThreadSafeBox<AbsolutePath>()
 
     private let useInMemoryCache: Bool
     private let memoryCache = ThreadSafeKeyValueStore<CacheKey, ManifestJSONParser.Result>()
@@ -341,7 +342,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         delegateQueue: DispatchQueue,
         callbackQueue: DispatchQueue
     ) async throws -> Manifest {
-        try await safe_async {
+        try await withCheckedThrowingContinuation { continuation in
             self.load(
                 manifestPath: manifestPath,
                 manifestToolsVersion: manifestToolsVersion,
@@ -355,7 +356,9 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                 observabilityScope: observabilityScope,
                 delegateQueue: delegateQueue, 
                 callbackQueue: callbackQueue,
-                completion: $0
+                completion: {
+                  continuation.resume(with: $0)
+                }
             )
         }
     }
@@ -569,6 +572,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                 toolsVersion: toolsVersion,
                 env: Environment.current.cachable,
                 swiftpmVersion: SwiftVersion.current.displayString,
+                extraManifestFlags: self.extraManifestFlags,
                 fileSystem: fileSystem
             )
         } catch {
@@ -768,13 +772,15 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         if toolsVersion >= .v5_8 {
             manifestPreamble = ByteString()
         } else {
-            manifestPreamble = ByteString("import Foundation\n")
+            manifestPreamble = ByteString("\nimport Foundation")
         }
 
         do {
             try withTemporaryDirectory { tempDir, cleanupTempDir in
                 let manifestTempFilePath = tempDir.appending("manifest.swift")
-                try localFileSystem.writeFileContents(manifestTempFilePath, bytes: ByteString(manifestPreamble.contents + manifestContents))
+                // Since this isn't overwriting the original file, append Foundation library
+                // import to avoid having diagnostics being displayed on the incorrect line.
+                try localFileSystem.writeFileContents(manifestTempFilePath, bytes: ByteString(manifestContents + manifestPreamble.contents))
 
                 let vfsOverlayTempFilePath = tempDir.appending("vfs.yaml")
                 try VFSOverlay(roots: [
@@ -1056,7 +1062,7 @@ public final class ManifestLoader: ManifestLoaderProtocol {
                         var environment = Environment.current
                         #if os(Windows)
                         let windowsPathComponent = runtimePath.pathString.replacingOccurrences(of: "/", with: "\\")
-                        environment["Path"] = "\(windowsPathComponent);\(environment["Path"] ?? "")"
+                        environment.prependPath(key: .path, value: windowsPathComponent)
                         #endif
 
                         let cleanupAfterRunning = cleanupIfError.delay()
@@ -1113,35 +1119,12 @@ public final class ManifestLoader: ManifestLoaderProtocol {
         }
     }
 
-    /// Returns path to the sdk, if possible.
-    private func sdkRoot() -> AbsolutePath? {
-        if let sdkRoot = self.sdkRootCache.get() {
-            return sdkRoot
-        }
-
-        var sdkRootPath: AbsolutePath? = nil
-        // Find SDKROOT on macOS using xcrun.
-        #if os(macOS)
-        let foundPath = try? AsyncProcess.checkNonZeroExit(
-            args: "/usr/bin/xcrun", "--sdk", "macosx", "--show-sdk-path")
-        guard let sdkRoot = foundPath?.spm_chomp(), !sdkRoot.isEmpty else {
-            return nil
-        }
-        if let path = try? AbsolutePath(validating: sdkRoot) {
-            sdkRootPath = path
-            self.sdkRootCache.put(path)
-        }
-        #endif
-
-        return sdkRootPath
-    }
-
-    /// Returns the interpreter flags for a manifest.
-    public func interpreterFlags(
-        for toolsVersion: ToolsVersion
+    package static func interpreterFlags(
+        for toolsVersion: ToolsVersion,
+        toolchain: some Toolchain
     ) -> [String] {
         var cmd = [String]()
-        let modulesPath = self.toolchain.swiftPMLibrariesLocation.manifestModulesPath
+        let modulesPath = toolchain.swiftPMLibrariesLocation.manifestModulesPath
         cmd += ["-swift-version", toolsVersion.swiftLanguageVersion.rawValue]
         // if runtimePath is set to "PackageFrameworks" that means we could be developing SwiftPM in Xcode
         // which produces a framework for dynamic package products.
@@ -1151,12 +1134,19 @@ public final class ManifestLoader: ManifestLoaderProtocol {
             cmd += ["-I", modulesPath.pathString]
         }
       #if os(macOS)
-        if let sdkRoot = self.toolchain.sdkRootPath ?? self.sdkRoot() {
+        if let sdkRoot = toolchain.sdkRootPath {
             cmd += ["-sdk", sdkRoot.pathString]
         }
       #endif
         cmd += ["-package-description-version", toolsVersion.description]
         return cmd
+    }
+
+    /// Returns the interpreter flags for a manifest.
+    public func interpreterFlags(
+        for toolsVersion: ToolsVersion
+    ) -> [String] {
+        return Self.interpreterFlags(for: toolsVersion, toolchain: toolchain)
     }
 
     /// Returns path to the manifest database inside the given cache directory.
@@ -1208,6 +1198,7 @@ extension ManifestLoader {
               toolsVersion: ToolsVersion,
               env: Environment,
               swiftpmVersion: String,
+              extraManifestFlags: [String],
               fileSystem: FileSystem
         ) throws {
             let manifestContents = try fileSystem.readFileContents(manifestPath).contents
@@ -1217,6 +1208,7 @@ extension ManifestLoader {
                 manifestContents: manifestContents,
                 toolsVersion: toolsVersion,
                 env: env,
+                extraManifestFlags: extraManifestFlags,
                 swiftpmVersion: swiftpmVersion
             )
 
@@ -1239,6 +1231,7 @@ extension ManifestLoader {
             manifestContents: [UInt8],
             toolsVersion: ToolsVersion,
             env: Environment,
+            extraManifestFlags: [String],
             swiftpmVersion: String
         ) throws -> String {
             let stream = BufferedOutputByteStream()
@@ -1250,6 +1243,9 @@ extension ManifestLoader {
                 stream.send(key.rawValue).send(value)
             }
             stream.send(swiftpmVersion)
+            for flag in extraManifestFlags {
+                stream.send(flag)
+            }
             return stream.bytes.sha256Checksum
         }
     }

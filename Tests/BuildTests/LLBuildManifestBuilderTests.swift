@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2015-2023 Apple Inc. and the Swift project authors
+// Copyright (c) 2015-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -20,14 +20,14 @@ import PackageGraph
 import PackageModel
 import struct SPMBuildCore.BuildParameters
 
+import _InternalBuildTestSupport
 @_spi(SwiftPMInternal)
 import _InternalTestSupport
 
-import class TSCBasic.InMemoryFileSystem
 import XCTest
 
 final class LLBuildManifestBuilderTests: XCTestCase {
-    func testCreateProductCommand() throws {
+    func testCreateProductCommand() async throws {
         let pkg = AbsolutePath("/pkg")
         let fs = InMemoryFileSystem(
             emptyFiles:
@@ -51,7 +51,7 @@ final class LLBuildManifestBuilderTests: XCTestCase {
 
         // macOS, release build
 
-        var plan = try mockBuildPlan(
+        var plan = try await mockBuildPlan(
             environment: BuildEnvironment(
                 platform: .macOS,
                 configuration: .release
@@ -84,7 +84,7 @@ final class LLBuildManifestBuilderTests: XCTestCase {
 
         // macOS, debug build
 
-        plan = try mockBuildPlan(
+        plan = try await mockBuildPlan(
             environment: BuildEnvironment(
                 platform: .macOS,
                 configuration: .debug
@@ -136,7 +136,7 @@ final class LLBuildManifestBuilderTests: XCTestCase {
 
         // Linux, release build
 
-        plan = try mockBuildPlan(
+        plan = try await mockBuildPlan(
             environment: BuildEnvironment(
                 platform: .linux,
                 configuration: .release
@@ -165,7 +165,7 @@ final class LLBuildManifestBuilderTests: XCTestCase {
 
         // Linux, debug build
 
-        plan = try mockBuildPlan(
+        plan = try await mockBuildPlan(
             environment: BuildEnvironment(
                 platform: .linux,
                 configuration: .debug
@@ -194,12 +194,12 @@ final class LLBuildManifestBuilderTests: XCTestCase {
     }
     
     /// Verifies that two modules with the same name but different triples don't share same build manifest keys.
-    func testToolsBuildTriple() throws {
+    func testToolsBuildTriple() async throws {
         let (graph, fs, scope) = try macrosPackageGraph()
         let productsTriple = Triple.x86_64MacOS
         let toolsTriple = Triple.arm64Linux
 
-        let plan = try BuildPlan(
+        let plan = try await BuildPlan(
             destinationBuildParameters: mockBuildParameters(
                 destination: .target,
                 shouldLinkStaticSwiftStdlib: true,

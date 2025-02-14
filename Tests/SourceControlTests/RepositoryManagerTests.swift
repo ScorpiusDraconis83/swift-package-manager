@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2014-2017 Apple Inc. and the Swift project authors
+// Copyright (c) 2014-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -11,14 +11,13 @@
 //===----------------------------------------------------------------------===//
 
 @testable import Basics
+import _Concurrency
 import PackageModel
 import _InternalTestSupport
 @testable import SourceControl
 import XCTest
 
-import class TSCBasic.InMemoryFileSystem
-
-class RepositoryManagerTests: XCTestCase {
+final class RepositoryManagerTests: XCTestCase {
     func testBasics() async throws {
         let fs = localFileSystem
         let observability = ObservabilitySystem.makeForTesting()
@@ -347,7 +346,8 @@ class RepositoryManagerTests: XCTestCase {
                 provider: provider,
                 delegate: delegate
             )
-            let dummyRepo = RepositorySpecifier(path: "/dummy")
+            let dummyRepoPath = try AbsolutePath(validating: "/dummy")
+            let dummyRepo = RepositorySpecifier(path: dummyRepoPath)
 
             let results = ThreadSafeKeyValueStore<Int, RepositoryManager.RepositoryHandle>()
             let concurrency = 10000
@@ -356,7 +356,7 @@ class RepositoryManagerTests: XCTestCase {
                     group.addTask {
                         delegate.prepare(fetchExpected: index == 0, updateExpected: index > 0)
                         results[index] = try await manager.lookup(
-                            package: .init(url: SourceControlURL(dummyRepo.url)),
+                            package: PackageIdentity(path: dummyRepoPath),
                             repository: dummyRepo,
                             updateStrategy: .always,
                             observabilityScope: observability.topScope,
@@ -453,11 +453,12 @@ class RepositoryManagerTests: XCTestCase {
         let finishGroup = DispatchGroup()
         let results = ThreadSafeKeyValueStore<RepositorySpecifier, Result<RepositoryManager.RepositoryHandle, Error>>()
         for index in 0 ..< total {
-            let repository = RepositorySpecifier(path: try .init(validating: "/repo/\(index)"))
+            let path = try AbsolutePath(validating: "/repo/\(index)")
+            let repository = RepositorySpecifier(path: path)
             provider.startGroup.enter()
             finishGroup.enter()
             manager.lookup(
-                package: .init(urlString: repository.url),
+                package: PackageIdentity(path: path),
                 repository: repository,
                 updateStrategy: .never,
                 observabilityScope: observability.topScope,
@@ -528,10 +529,6 @@ class RepositoryManagerTests: XCTestCase {
                 print("\(repository) okay")
             }
 
-            func repositoryExists(at path: AbsolutePath) throws -> Bool {
-                return false
-            }
-
             func open(repository: RepositorySpecifier, at path: AbsolutePath) throws -> Repository {
                 fatalError("should not be called")
             }
@@ -553,7 +550,7 @@ class RepositoryManagerTests: XCTestCase {
             }
 
             func isValidDirectory(_ directory: AbsolutePath) throws -> Bool {
-                fatalError("should not be called")
+                return false
             }
 
             public func isValidDirectory(_ directory: AbsolutePath, for repository: RepositorySpecifier) throws -> Bool {
@@ -606,11 +603,6 @@ class RepositoryManagerTests: XCTestCase {
                 self.fetch += 1
             }
 
-            func repositoryExists(at path: AbsolutePath) throws -> Bool {
-                // the directory exists
-                return true
-            }
-
             func open(repository: RepositorySpecifier, at path: AbsolutePath) throws -> Repository {
                 return MockRepository()
             }
@@ -632,7 +624,8 @@ class RepositoryManagerTests: XCTestCase {
             }
 
             func isValidDirectory(_ directory: AbsolutePath) throws -> Bool {
-                fatalError("should not be called")
+                // the directory exists
+                return true
             }
 
             public func isValidDirectory(_ directory: AbsolutePath, for repository: RepositorySpecifier) throws -> Bool {
@@ -660,14 +653,6 @@ class RepositoryManagerTests: XCTestCase {
             }
 
             func exists(revision: Revision) -> Bool {
-                fatalError("unexpected API call")
-            }
-
-            func isValidDirectory(_ directory: AbsolutePath) throws -> Bool {
-                fatalError("unexpected API call")
-            }
-
-            public func isValidDirectory(_ directory: AbsolutePath, for repository: RepositorySpecifier) throws -> Bool {
                 fatalError("unexpected API call")
             }
 
@@ -713,7 +698,7 @@ extension RepositoryManager {
         updateStrategy: RepositoryUpdateStrategy = .always,
         observabilityScope: ObservabilityScope
     ) async throws -> RepositoryHandle {
-        return try await safe_async {
+        return try await withCheckedThrowingContinuation { continuation in
             self.lookup(
                 package: .init(url: SourceControlURL(repository.url)),
                 repository: repository,
@@ -721,7 +706,9 @@ extension RepositoryManager {
                 observabilityScope: observabilityScope,
                 delegateQueue: .sharedConcurrent,
                 callbackQueue: .sharedConcurrent,
-                completion: $0
+                completion: {
+                  continuation.resume(with: $0)
+                }
             )
         }
     }
@@ -752,14 +739,10 @@ private class DummyRepositoryProvider: RepositoryProvider {
         }
 
         // We only support one dummy URL.
-        let basename = (repository.url as NSString).lastPathComponent
+        let basename = repository.basename
         if basename != "dummy" {
             throw DummyError.invalidRepository
         }
-    }
-
-    public func repositoryExists(at path: AbsolutePath) throws -> Bool {
-        return self.fileSystem.isDirectory(path)
     }
 
     func copy(from sourcePath: AbsolutePath, to destinationPath: AbsolutePath) throws {
@@ -795,7 +778,7 @@ private class DummyRepositoryProvider: RepositoryProvider {
     }
 
     func isValidDirectory(_ directory: AbsolutePath) throws -> Bool {
-        return true
+        return self.fileSystem.isDirectory(directory)
     }
 
     func isValidDirectory(_ directory: AbsolutePath, for repository: RepositorySpecifier) throws -> Bool {
@@ -973,14 +956,6 @@ fileprivate class DummyRepository: Repository {
     }
 
     func exists(revision: Revision) -> Bool {
-        fatalError("unexpected API call")
-    }
-
-    func isValidDirectory(_ directory: AbsolutePath) throws -> Bool {
-        fatalError("unexpected API call")
-    }
-
-    public func isValidDirectory(_ directory: AbsolutePath, for repository: RepositorySpecifier) throws -> Bool {
         fatalError("unexpected API call")
     }
 

@@ -23,7 +23,7 @@ The [SourceKit-LSP](https://github.com/swiftlang/sourcekit-lsp) project leverage
 
 ## Getting Started
 
-Please use [this guide](https://swift.org/getting-started/#using-the-package-manager) for learning package manager basics.
+Please use [this guide](https://www.swift.org/documentation/package-manager/) for learning package manager basics.
 
 ---
 
@@ -43,7 +43,7 @@ For release notes with information about changes between versions, see the [rele
 
 ## System Requirements
 
-The package manager’s system requirements are the same as [those for Swift](https://github.com/apple/swift#system-requirements) with the caveat that the package manager requires Git at runtime as well as build-time.
+The package manager’s system requirements are the same as [those for Swift](https://github.com/swiftlang/swift/blob/main/docs/HowToGuides/GettingStarted.md#system-requirements) with the caveat that the package manager requires Git at runtime as well as build-time.
 
 ---
 
@@ -83,7 +83,7 @@ If you’re not comfortable sharing your question with the list, contact details
 
 ## License
 
-Copyright 2015 - 2023 Apple Inc. and the Swift project authors. Licensed under Apache License v2.0 with Runtime Library Exception.
+Copyright 2015 - 2024 Apple Inc. and the Swift project authors. Licensed under Apache License v2.0 with Runtime Library Exception.
 
 See [https://swift.org/LICENSE.txt](https://swift.org/LICENSE.txt) for license information.
 

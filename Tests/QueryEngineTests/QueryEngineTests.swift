@@ -10,7 +10,9 @@
 //
 //===----------------------------------------------------------------------===//
 
-import class Basics.ObservabilitySystem
+import _AsyncFileSystem
+import Basics
+import Crypto
 import struct Foundation.Data
 @testable import QueryEngine
 import struct SystemPackage.FilePath
@@ -27,9 +29,7 @@ private extension AsyncFileSystem {
       for try await chunk in try await $0.read() {
         data.append(contentsOf: chunk)
 
-        guard data.count < bufferLimit else {
-          throw FileSystemError.bufferLimitExceeded(path)
-        }
+        assert(data.count < bufferLimit)
       }
       return data
     }
@@ -45,7 +45,7 @@ private extension AsyncFileSystem {
   }
 }
 
-private struct Const: Query {
+private struct Const: CachingQuery {
   let x: Int
 
   func run(engine: QueryEngine) async throws -> FilePath {
@@ -55,7 +55,7 @@ private struct Const: Query {
   }
 }
 
-private struct MultiplyByTwo: Query {
+private struct MultiplyByTwo: CachingQuery {
   let x: Int
 
   func run(engine: QueryEngine) async throws -> FilePath {
@@ -68,7 +68,7 @@ private struct MultiplyByTwo: Query {
   }
 }
 
-private struct AddThirty: Query {
+private struct AddThirty: CachingQuery {
   let x: Int
 
   func run(engine: QueryEngine) async throws -> FilePath {
@@ -81,7 +81,7 @@ private struct AddThirty: Query {
   }
 }
 
-private struct Expression: Query {
+private struct Expression: CachingQuery {
   let x: Int
   let y: Int
 
@@ -99,10 +99,25 @@ private struct Expression: Query {
 }
 
 final class QueryEngineTests: XCTestCase {
+  func testFilePathHashing() throws {
+    let path = "/root"
+
+    let hashEncoder1 = HashEncoder<SHA256>()
+    try hashEncoder1.encode(FilePath(path))
+    let digest1 = hashEncoder1.finalize()
+
+    let hashEncoder2 = HashEncoder<SHA256>()
+    try hashEncoder2.encode(String(reflecting: FilePath.self))
+    try hashEncoder2.encode(path)
+    let digest2 = hashEncoder2.finalize()
+
+    XCTAssertEqual(digest1, digest2)
+  }
+
   func testSimpleCaching() async throws {
     let observabilitySystem = ObservabilitySystem.makeForTesting()
     let engine = QueryEngine(
-      VirtualFileSystem(),
+      MockFileSystem(),
       observabilitySystem.topScope,
       cacheLocation: .memory
     )

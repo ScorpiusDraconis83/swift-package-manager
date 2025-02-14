@@ -2,7 +2,7 @@
 
 There are several types of contributions one can make. Bug fixes, documentation and enhancements that do not materially change the user facing semantics of Swift Package Manager should be submitted directly as PR.
 
-Larger changes that do materially change the semantics of Swift Package Manager (e.g. changes to the manifest format or behavior) are required to go through [Swift Evolution Process](https://github.com/apple/swift-evolution/blob/master/process.md).
+Larger changes that do materially change the semantics of Swift Package Manager (e.g. changes to the manifest format or behavior) are required to go through [Swift Evolution Process](https://github.com/swiftlang/swift-evolution/blob/master/process.md).
 
 To see how previous evolution decisions for SwiftPM have been made and have some direction for the development of future features please check out the [Community Proposals](https://forums.swift.org/tag/packagemanager).
 
@@ -336,11 +336,6 @@ license](https://swift.org/LICENSE.txt).
 
 SwiftPM uses [swift-ci](https://ci.swift.org) infrastructure for its continuous integration testing. The bots can be triggered on pull-requests if you have commit access. Otherwise, ask one of the code owners to trigger them for you.
 
-To run smoke test suite with the trunk compiler and other projects use:
-
-```
-@swift-ci please smoke test
-```
 
 This is **required** before a pull-request can be merged.
 
@@ -348,7 +343,7 @@ This is **required** before a pull-request can be merged.
 To run just the self-hosted test suite (faster turnaround times so it can be used to get quick feedback) use:
 
 ```
-@swift-ci please smoke test self hosted
+@swift-ci please test self hosted
 ```
 
 
@@ -358,12 +353,20 @@ To run the swift toolchain test suite including SwiftPM use:
 @swift-ci please test
 ```
 
+To run the swift toolchain test suite against a specific platform use one of the following:
+
+```
+@swift-ci please test macos
+@swift-ci please test linux
+@swift-ci please test windows
+```
 
 To run package compatibility test suite (validates we do not break 3rd party packages) use:
 
 ```
 @swift-ci please test package compatibility
 ```
+
 
 ## Generating Documentation
 

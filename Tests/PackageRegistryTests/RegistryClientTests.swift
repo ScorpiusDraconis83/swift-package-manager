@@ -2,7 +2,7 @@
 //
 // This source file is part of the Swift open source project
 //
-// Copyright (c) 2021-2023 Apple Inc. and the Swift project authors
+// Copyright (c) 2021-2024 Apple Inc. and the Swift project authors
 // Licensed under Apache License v2.0 with Runtime Library Exception
 //
 // See http://swift.org/LICENSE.txt for license information
@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import _Concurrency
 import Foundation
 import PackageFingerprint
 import PackageLoading
@@ -21,8 +22,6 @@ import _InternalTestSupport
 import XCTest
 
 import protocol TSCBasic.HashAlgorithm
-import class TSCBasic.InMemoryFileSystem
-
 import struct TSCUtility.Version
 
 final class RegistryClientTests: XCTestCase {
@@ -89,12 +88,205 @@ final class RegistryClientTests: XCTestCase {
         let registryClient = makeRegistryClient(configuration: configuration, httpClient: httpClient)
         let metadata = try await registryClient.getPackageMetadata(package: identity)
         XCTAssertEqual(metadata.versions, ["1.1.1", "1.0.0"])
-        XCTAssertEqual(metadata.alternateLocations!, [
+        XCTAssertEqual(metadata.alternateLocations, [
             SourceControlURL("https://github.com/mona/LinkedList"),
             SourceControlURL("ssh://git@github.com:mona/LinkedList.git"),
             SourceControlURL("git@github.com:mona/LinkedList.git"),
             SourceControlURL("https://gitlab.com/mona/LinkedList"),
         ])
+
+        let metadataSync = try await withCheckedThrowingContinuation { continuation in
+            return registryClient.getPackageMetadata(
+                package: identity,
+                timeout: nil,
+                observabilityScope: ObservabilitySystem.NOOP,
+                callbackQueue: .sharedConcurrent,
+                completion: { continuation.resume(with: $0) }
+            )
+        }
+        XCTAssertEqual(metadataSync.versions, ["1.1.1", "1.0.0"])
+        XCTAssertEqual(metadataSync.alternateLocations, [
+            SourceControlURL("https://github.com/mona/LinkedList"),
+            SourceControlURL("ssh://git@github.com:mona/LinkedList.git"),
+            SourceControlURL("git@github.com:mona/LinkedList.git"),
+            SourceControlURL("https://gitlab.com/mona/LinkedList"),
+        ])
+    }
+
+    func testGetPackageMetadataPaginated() async throws {
+        let registryURL = URL("https://packages.example.com")
+        let identity = PackageIdentity.plain("mona.LinkedList")
+        let releasesURL = URL("\(registryURL)/\(identity.registry!.scope)/\(identity.registry!.name)")
+        let releasesURLPage2 = URL("\(registryURL)/\(identity.registry!.scope)/\(identity.registry!.name)?page=2")
+
+        let handler: LegacyHTTPClient.Handler = { request, _, completion in
+            guard case .get = request.method else {
+                return completion(.failure(StringError("method should be `get`")))
+            }
+
+            XCTAssertEqual(request.headers.get("Accept").first, "application/vnd.swift.registry.v1+json")
+            let links: String
+            let data: Data
+            switch request.url {
+            case releasesURL:
+                data = #"""
+                {
+                    "releases": {
+                        "1.1.1": {
+                            "url": "https://packages.example.com/mona/LinkedList/1.1.1"
+                        },
+                        "1.1.0": {
+                            "url": "https://packages.example.com/mona/LinkedList/1.1.0",
+                            "problem": {
+                                "status": 410,
+                                "title": "Gone",
+                                "detail": "this release was removed from the registry"
+                            }
+                        }
+                    }
+                }
+                """#.data(using: .utf8)!
+
+                links = """
+                <https://github.com/mona/LinkedList>; rel="canonical",
+                <ssh://git@github.com:mona/LinkedList.git>; rel="alternate",
+                <git@github.com:mona/LinkedList.git>; rel="alternate",
+                <https://gitlab.com/mona/LinkedList>; rel="alternate",
+                <\(releasesURLPage2)>; rel="next"
+                """
+            case releasesURLPage2:
+                data = #"""
+                {
+                    "releases": {
+                        "1.0.0": {
+                            "url": "https://packages.example.com/mona/LinkedList/1.0.0"
+                        }
+                    }
+                }
+                """#.data(using: .utf8)!
+
+                links = """
+                <https://github.com/mona/LinkedList>; rel="canonical",
+                <ssh://git@github.com:mona/LinkedList.git>; rel="alternate",
+                <git@github.com:mona/LinkedList.git>; rel="alternate",
+                <https://gitlab.com/mona/LinkedList>; rel="alternate"
+                """
+            default:
+                return completion(.failure(StringError("method and url should match")))
+            }
+
+            completion(.success(.init(
+                statusCode: 200,
+                headers: .init([
+                    .init(name: "Content-Length", value: "\(data.count)"),
+                    .init(name: "Content-Type", value: "application/json"),
+                    .init(name: "Content-Version", value: "1"),
+                    .init(name: "Link", value: links),
+                ]),
+                body: data
+            )))
+        }
+
+        let httpClient = LegacyHTTPClient(handler: handler)
+        httpClient.configuration.circuitBreakerStrategy = .none
+        httpClient.configuration.retryStrategy = .none
+
+        var configuration = RegistryConfiguration()
+        configuration.defaultRegistry = Registry(url: registryURL, supportsAvailability: false)
+
+        let registryClient = makeRegistryClient(configuration: configuration, httpClient: httpClient)
+        let metadata = try await registryClient.getPackageMetadata(package: identity)
+        XCTAssertEqual(metadata.versions, ["1.1.1", "1.0.0"])
+        XCTAssertEqual(metadata.alternateLocations, [
+            SourceControlURL("https://github.com/mona/LinkedList"),
+            SourceControlURL("ssh://git@github.com:mona/LinkedList.git"),
+            SourceControlURL("git@github.com:mona/LinkedList.git"),
+            SourceControlURL("https://gitlab.com/mona/LinkedList"),
+        ])
+    }
+
+    func testGetPackageMetadataPaginated_Cancellation() async throws {
+        let registryURL = URL("https://packages.example.com")
+        let identity = PackageIdentity.plain("mona.LinkedList")
+        let releasesURL = URL("\(registryURL)/\(identity.registry!.scope)/\(identity.registry!.name)")
+        let releasesURLPage2 = URL("\(registryURL)/\(identity.registry!.scope)/\(identity.registry!.name)?page=2")
+
+        var task: Task<Void, Error>? = nil
+        let handler: LegacyHTTPClient.Handler = { request, _, completion in
+            guard case .get = request.method else {
+                return completion(.failure(StringError("method should be `get`")))
+            }
+
+            XCTAssertEqual(request.headers.get("Accept").first, "application/vnd.swift.registry.v1+json")
+            let links: String
+            let data: Data
+            switch request.url {
+            case releasesURLPage2:
+                // Cancel during the second iteration
+                task?.cancel()
+                fallthrough
+            case releasesURL:
+                data = #"""
+                {
+                    "releases": {
+                        "1.1.1": {
+                            "url": "https://packages.example.com/mona/LinkedList/1.1.1"
+                        },
+                        "1.1.0": {
+                            "url": "https://packages.example.com/mona/LinkedList/1.1.0",
+                            "problem": {
+                                "status": 410,
+                                "title": "Gone",
+                                "detail": "this release was removed from the registry"
+                            }
+                        }
+                    }
+                }
+                """#.data(using: .utf8)!
+
+                links = """
+                <https://github.com/mona/LinkedList>; rel="canonical",
+                <ssh://git@github.com:mona/LinkedList.git>; rel="alternate",
+                <git@github.com:mona/LinkedList.git>; rel="alternate",
+                <https://gitlab.com/mona/LinkedList>; rel="alternate",
+                <\(releasesURLPage2)>; rel="next"
+                """
+            default:
+                return completion(.failure(StringError("method and url should match")))
+            }
+
+            completion(.success(.init(
+                statusCode: 200,
+                headers: .init([
+                    .init(name: "Content-Length", value: "\(data.count)"),
+                    .init(name: "Content-Type", value: "application/json"),
+                    .init(name: "Content-Version", value: "1"),
+                    .init(name: "Link", value: links),
+                ]),
+                body: data
+            )))
+        }
+
+        let httpClient = LegacyHTTPClient(handler: handler)
+        httpClient.configuration.circuitBreakerStrategy = .none
+        httpClient.configuration.retryStrategy = .none
+
+        var configuration = RegistryConfiguration()
+        configuration.defaultRegistry = Registry(url: registryURL, supportsAvailability: false)
+
+        let registryClient = makeRegistryClient(configuration: configuration, httpClient: httpClient)
+        task = Task {
+            do {
+                _ = try await registryClient.getPackageMetadata(package: identity)
+                XCTFail("Task completed without being cancelled")
+            } catch let error where error is _Concurrency.CancellationError {
+                // OK
+            } catch {
+                XCTFail("Task failed with unexpected error: \(error)")
+            }
+        }
+
+        try await task?.value
     }
 
     func testGetPackageMetadata_NotFound() async throws {
@@ -2538,18 +2730,14 @@ final class RegistryClientTests: XCTestCase {
         XCTAssertEqual(contents.sorted(), [RegistryReleaseMetadataStorage.fileName, "Package.swift"].sorted())
 
         // Expected checksum is not found in storage so the metadata API will be called
-        let fingerprint = try await safe_async {
-            fingerprintStorage.get(
-                package: identity,
-                version: version,
-                kind: .registry,
-                contentType: .sourceCode,
-                observabilityScope: ObservabilitySystem
-                    .NOOP,
-                callbackQueue: .sharedConcurrent,
-                callback: $0
-            )
-        }
+        let fingerprint = try fingerprintStorage.get(
+            package: identity,
+            version: version,
+            kind: .registry,
+            contentType: .sourceCode,
+            observabilityScope: ObservabilitySystem
+                .NOOP
+        )
         XCTAssertEqual(SourceControlURL(registryURL), fingerprint.origin.url)
         XCTAssertEqual(checksum, fingerprint.value)
     }
@@ -3844,18 +4032,17 @@ extension RegistryClient {
     func getPackageVersionMetadata(
         package: PackageIdentity.RegistryIdentity,
         version: Version
-    ) throws -> PackageVersionMetadata {
-        // TODO: Finish removing this temp_await
-        // It can't currently be removed because it is passed to
-        // PackageVersionChecksumTOFU which expects a non async method
-        return try temp_await { completion in
+    ) async throws -> PackageVersionMetadata {
+        return try await withCheckedThrowingContinuation { continuation in
             self.getPackageVersionMetadata(
                 package: package.underlying,
                 version: version,
                 fileSystem: InMemoryFileSystem(),
                 observabilityScope: ObservabilitySystem.NOOP,
                 callbackQueue: .sharedConcurrent,
-                completion: completion
+                completion: {
+                  continuation.resume(with: $0)
+                }
             )
         }
     }

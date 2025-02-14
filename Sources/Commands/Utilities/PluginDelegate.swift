@@ -11,10 +11,12 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import _Concurrency
 import CoreCommands
 import Foundation
 import PackageModel
 import SPMBuildCore
+import PackageGraph
 
 import protocol TSCBasic.OutputByteStream
 import class TSCBasic.BufferedOutputByteStream
@@ -65,10 +67,12 @@ final class PluginDelegate: PluginInvocationDelegate {
         completion: @escaping (Result<PluginInvocationBuildResult, Error>) -> Void
     ) {
         // Run the build in the background and call the completion handler when done.
-        DispatchQueue.sharedConcurrent.async {
-            completion(Result {
-                return try self.performBuildForPlugin(subset: subset, parameters: parameters)
-            })
+        Task {
+            do {
+                try await completion(.success(self.performBuildForPlugin(subset: subset, parameters: parameters)))
+            } catch {
+                completion(.failure(error))
+            }
         }
     }
 
@@ -109,7 +113,7 @@ final class PluginDelegate: PluginInvocationDelegate {
     private func performBuildForPlugin(
         subset: PluginInvocationBuildSubset,
         parameters: PluginInvocationBuildParameters
-    ) throws -> PluginInvocationBuildResult {
+    ) async throws -> PluginInvocationBuildResult {
         // Configure the build parameters.
         var buildParameters = try self.swiftCommandState.productsBuildParameters
         switch parameters.configuration {
@@ -144,6 +148,10 @@ final class PluginDelegate: PluginInvocationDelegate {
         switch subset {
         case .all(let includingTests):
             buildSubset = includingTests ? .allIncludingTests : .allExcludingTests
+            if includingTests {
+                // Enable testability if we're building tests explicitly.
+                buildParameters.testingParameters.explicitlyEnabledTestability = true
+            }
         case .product(let name):
             buildSubset = .product(name)
             explicitProduct = name
@@ -158,7 +166,7 @@ final class PluginDelegate: PluginInvocationDelegate {
             outputStream.addStream(swiftCommandState.outputStream)
         }
 
-        let buildSystem = try swiftCommandState.createBuildSystem(
+        let buildSystem = try await swiftCommandState.createBuildSystem(
             explicitBuildSystem: .native,
             explicitProduct: explicitProduct,
             traitConfiguration: .init(),
@@ -169,7 +177,7 @@ final class PluginDelegate: PluginInvocationDelegate {
         )
 
         // Run the build. This doesn't return until the build is complete.
-        let success = buildSystem.buildIgnoringError(subset: buildSubset)
+        let success = await buildSystem.buildIgnoringError(subset: buildSubset)
 
         // Create and return the build result record based on what the delegate collected and what's in the build plan.
         let builtProducts = try buildSystem.buildPlan.buildProducts.filter {
@@ -207,28 +215,30 @@ final class PluginDelegate: PluginInvocationDelegate {
         completion: @escaping (Result<PluginInvocationTestResult, Error>
         ) -> Void) {
         // Run the test in the background and call the completion handler when done.
-        DispatchQueue.sharedConcurrent.async {
-            completion(Result {
-                return try self.performTestsForPlugin(subset: subset, parameters: parameters)
-            })
+        Task {
+            do {
+                try await completion(.success(self.performTestsForPlugin(subset: subset, parameters: parameters)))
+            } catch {
+                completion(.failure(error))
+            }
         }
     }
 
     func performTestsForPlugin(
         subset: PluginInvocationTestSubset,
         parameters: PluginInvocationTestParameters
-    ) throws -> PluginInvocationTestResult {
+    ) async throws -> PluginInvocationTestResult {
         // Build the tests. Ideally we should only build those that match the subset, but we don't have a way to know
         // which ones they are until we've built them and can examine the binaries.
         let toolchain = try swiftCommandState.getHostToolchain()
         var toolsBuildParameters = try swiftCommandState.toolsBuildParameters
-        toolsBuildParameters.testingParameters.enableTestability = true
+        toolsBuildParameters.testingParameters.explicitlyEnabledTestability = true
         toolsBuildParameters.testingParameters.enableCodeCoverage = parameters.enableCodeCoverage
-        let buildSystem = try swiftCommandState.createBuildSystem(
+        let buildSystem = try await swiftCommandState.createBuildSystem(
             traitConfiguration: .init(),
             toolsBuildParameters: toolsBuildParameters
         )
-        try buildSystem.build(subset: .allIncludingTests)
+        try await buildSystem.build(subset: .allIncludingTests)
 
         // Clean out the code coverage directory that may contain stale `profraw` files from a previous run of
         // the code coverage tool.
@@ -247,7 +257,7 @@ final class PluginDelegate: PluginInvocationDelegate {
         // Iterate over the tests and run those that match the filter.
         var testTargetResults: [PluginInvocationTestResult.TestTarget] = []
         var numFailedTests = 0
-        for testProduct in buildSystem.builtTestProducts {
+        for testProduct in await buildSystem.builtTestProducts {
             // Get the test suites in the bundle. Each is just a container for test cases.
             let testSuites = try TestingSupport.getTestSuites(
                 fromTestAt: testProduct.bundlePath,
@@ -288,11 +298,11 @@ final class PluginDelegate: PluginInvocationDelegate {
 
                         // Run the test — for now we run the sequentially so we can capture accurate timing results.
                         let startTime = DispatchTime.now()
-                        let success = testRunner.test(outputHandler: { _ in }) // this drops the tests output
+                        let result = testRunner.test(outputHandler: { _ in }) // this drops the tests output
                         let duration = Double(startTime.distance(to: .now()).milliseconds() ?? 0) / 1000.0
-                        numFailedTests += success ? 0 : 1
+                        numFailedTests += (result != .failure) ? 0 : 1
                         testResults.append(
-                            .init(name: testName, result: success ? .succeeded : .failed, duration: duration)
+                            .init(name: testName, result: (result != .failure) ? .succeeded : .failed, duration: duration)
                         )
                     }
 
@@ -334,17 +344,17 @@ final class PluginDelegate: PluginInvocationDelegate {
                 llvmProfCommand.append(filePath.pathString)
             }
             llvmProfCommand += ["-o", mergedCovFile.pathString]
-            try AsyncProcess.checkNonZeroExit(arguments: llvmProfCommand)
+            try await AsyncProcess.checkNonZeroExit(arguments: llvmProfCommand)
 
             // Use `llvm-cov` to export the merged `.profdata` file contents in JSON form.
             var llvmCovCommand = [try toolchain.getLLVMCov().pathString]
             llvmCovCommand += ["export", "-instr-profile=\(mergedCovFile.pathString)"]
-            for product in buildSystem.builtTestProducts {
+            for product in await buildSystem.builtTestProducts {
                 llvmCovCommand.append("-object")
                 llvmCovCommand.append(product.binaryPath.pathString)
             }
             // We get the output on stdout, and have to write it to a JSON ourselves.
-            let jsonOutput = try AsyncProcess.checkNonZeroExit(arguments: llvmCovCommand)
+            let jsonOutput = try await AsyncProcess.checkNonZeroExit(arguments: llvmCovCommand)
             let jsonCovFile = toolsBuildParameters.codeCovDataFile.parentDirectory.appending(
                 component: toolsBuildParameters.codeCovDataFile.basenameWithoutExt + ".json"
             )
@@ -370,46 +380,53 @@ final class PluginDelegate: PluginInvocationDelegate {
         completion: @escaping (Result<PluginInvocationSymbolGraphResult, Error>) -> Void
     ) {
         // Extract the symbol graph in the background and call the completion handler when done.
-        DispatchQueue.sharedConcurrent.async {
-            completion(Result {
-                return try self.createSymbolGraphForPlugin(forTarget: targetName, options: options)
-            })
+        Task {
+            do {
+                try await completion(.success(self.createSymbolGraphForPlugin(forTarget: targetName, options: options)))
+            } catch {
+                completion(.failure(error))
+            }
         }
     }
 
     private func createSymbolGraphForPlugin(
         forTarget targetName: String,
         options: PluginInvocationSymbolGraphOptions
-    ) throws -> PluginInvocationSymbolGraphResult {
+    ) async throws -> PluginInvocationSymbolGraphResult {
         // Current implementation uses `SymbolGraphExtract()`, but in the future we should emit the symbol graph
         // while building.
 
         // Create a build system for building the target., skipping the the cache because we need the build plan.
-        let buildSystem = try swiftCommandState.createBuildSystem(
+        let buildSystem = try await swiftCommandState.createBuildSystem(
             explicitBuildSystem: .native,
-            traitConfiguration: .init(),
+            traitConfiguration: TraitConfiguration(enableAllTraits: true),
             cacheBuildManifest: false
         )
 
-        // Find the target in the build operation's package graph; it's an error if we don't find it.
-        let packageGraph = try buildSystem.getPackageGraph()
-        guard let target = packageGraph.module(for: targetName) else {
-            throw StringError("could not find a target named “\(targetName)”")
+        func lookupDescription(
+            for moduleName: String,
+            destination: BuildParameters.Destination
+        ) throws -> ModuleBuildDescription? {
+            try buildSystem.buildPlan.buildModules.first {
+                $0.module.name == moduleName && $0.buildParameters.destination == destination
+            }
         }
 
-        // FIXME: This is currently necessary because `target(for:destination:)` can
-        // produce a module that is targeting host when `targetName`` corresponds to
-        // a macro, plugin, or a test. Ideally we'd ask a build system for a`BuildSubset`
-        // and get the destination from there but there are other places that need
-        // refactoring in that way as well.
-        let buildParameters = if target.buildTriple == .tools {
-                try swiftCommandState.toolsBuildParameters
-            } else {
-                try swiftCommandState.productsBuildParameters
-            }
+        // Build the target, if needed. This would also create a build plan.
+        try await buildSystem.build(subset: .target(targetName))
 
-        // Build the target, if needed.
-        try buildSystem.build(subset: .target(target.name, for: buildParameters.destination))
+        // FIXME: The name alone doesn't give us enough information to figure out what
+        // the destination is, this logic prefers "target" over "host" because that's
+        // historically how this was setup. Ideally we should be building for both "host"
+        // and "target" if module is configured for them but that would require changing
+        // `PluginInvocationSymbolGraphResult` to carry multiple directories.
+        let description = if let targetDescription = try lookupDescription(for: targetName, destination: .target) {
+            targetDescription
+        } else if let hostDescription = try lookupDescription(for: targetName, destination: .host) {
+            hostDescription
+        } else {
+            throw InternalError("could not find a target named: \(targetName)")
+        }
 
         // Configure the symbol graph extractor.
         var symbolGraphExtractor = try SymbolGraphExtract(
@@ -435,21 +452,16 @@ final class PluginDelegate: PluginInvocationDelegate {
         symbolGraphExtractor.emitExtensionBlockSymbols = options.emitExtensionBlocks
 
         // Determine the output directory, and remove any old version if it already exists.
-        guard let package = packageGraph.package(for: target) else {
-            throw StringError("could not determine the package for target “\(target.name)”")
-        }
-        let outputDir = buildParameters.dataPath.appending(
+        let outputDir = description.buildParameters.dataPath.appending(
             components: "extracted-symbols",
-            package.identity.description,
-            target.name
+            description.package.identity.description,
+            targetName
         )
         try swiftCommandState.fileSystem.removeFileTree(outputDir)
 
         // Run the symbol graph extractor on the target.
         let result = try symbolGraphExtractor.extractSymbolGraph(
-            module: target,
-            buildPlan: try buildSystem.buildPlan,
-            buildParameters: buildParameters,
+            for: description,
             outputRedirection: .collect,
             outputDirectory: outputDir,
             verboseOutput: self.swiftCommandState.logLevel <= .info
@@ -465,9 +477,9 @@ final class PluginDelegate: PluginInvocationDelegate {
 }
 
 extension BuildSystem {
-    fileprivate func buildIgnoringError(subset: BuildSubset) -> Bool {
+    fileprivate func buildIgnoringError(subset: BuildSubset) async -> Bool {
         do {
-            try self.build(subset: subset)
+            try await self.build(subset: subset)
             return true
         } catch {
             return false

@@ -54,20 +54,25 @@ extension SwiftPackageCommand {
                 throw InternalError("Could not find the current working directory")
             }
 
-            // NOTE: Do not use testLibraryOptions.enabledTestingLibraries(swiftCommandState:) here
-            // because the package doesn't exist yet, so there are no dependencies for it to query.
-            var testingLibraries: Set<BuildParameters.Testing.Library> = []
-            if testLibraryOptions.enableXCTestSupport {
-                testingLibraries.insert(.xctest)
-            }
-            if testLibraryOptions.explicitlyEnableSwiftTestingLibrarySupport == true {
-                testingLibraries.insert(.swiftTesting)
-            }
             let packageName = self.packageName ?? cwd.basename
+
+            // Testing is on by default, with XCTest only enabled explicitly.
+            // For macros this is reversed, since we don't support testing
+            // macros with Swift Testing yet.
+            var supportedTestingLibraries = Set<TestingLibrary>()
+            if testLibraryOptions.isExplicitlyEnabled(.xctest, swiftCommandState: swiftCommandState) ||
+                (initMode == .macro && testLibraryOptions.isEnabled(.xctest, swiftCommandState: swiftCommandState)) {
+                supportedTestingLibraries.insert(.xctest)
+            }
+            if testLibraryOptions.isExplicitlyEnabled(.swiftTesting, swiftCommandState: swiftCommandState) ||
+                (initMode != .macro && testLibraryOptions.isEnabled(.swiftTesting, swiftCommandState: swiftCommandState)) {
+                supportedTestingLibraries.insert(.swiftTesting)
+            }
+
             let initPackage = try InitPackage(
                 name: packageName,
                 packageType: initMode,
-                supportedTestingLibraries: testingLibraries,
+                supportedTestingLibraries: supportedTestingLibraries,
                 destinationPath: cwd,
                 installedSwiftPMConfiguration: swiftCommandState.getHostToolchain().installedSwiftPMConfiguration,
                 fileSystem: swiftCommandState.fileSystem

@@ -14,16 +14,33 @@ import Basics
 import Commands
 import PackageModel
 import _InternalTestSupport
+import TSCTestSupport
 import XCTest
 
 final class TestCommandTests: CommandsTestCase {
-    private func execute(_ args: [String], packagePath: AbsolutePath? = nil) async throws -> (stdout: String, stderr: String) {
-        try await SwiftPM.Test.execute(args, packagePath: packagePath)
+    private func execute(
+        _ args: [String],
+        packagePath: AbsolutePath? = nil,
+        throwIfCommandFails: Bool = true
+    ) async throws -> (stdout: String, stderr: String) {
+        try await SwiftPM.Test.execute(args, packagePath: packagePath, throwIfCommandFails: throwIfCommandFails)
     }
 
     func testUsage() async throws {
         let stdout = try await execute(["-help"]).stdout
         XCTAssert(stdout.contains("USAGE: swift test"), "got stdout:\n" + stdout)
+    }
+
+    func testExperimentalXunitMessageFailureArgumentIsHidden() async throws {
+        let stdout = try await execute(["--help"]).stdout
+        XCTAssertFalse(
+            stdout.contains("--experimental-xunit-message-failure"),
+            "got stdout:\n" + stdout
+        )
+        XCTAssertFalse(
+            stdout.contains("When Set, enabled an experimental message failure content (XCTest only)."),
+            "got stdout:\n" + stdout
+        )
     }
 
     func testSeeAlso() async throws {
@@ -35,6 +52,24 @@ final class TestCommandTests: CommandsTestCase {
         let stdout = try await execute(["--version"]).stdout
         XCTAssert(stdout.contains("Swift Package Manager"), "got stdout:\n" + stdout)
     }
+
+    // `echo.sh` script from the toolset won't work on Windows
+    #if !os(Windows)
+        func testToolsetRunner() async throws {
+            try await fixture(name: "Miscellaneous/EchoExecutable") { fixturePath in
+                let (stdout, stderr) = try await SwiftPM.Test.execute(
+                    ["--toolset", "\(fixturePath)/toolset.json"], packagePath: fixturePath)
+
+                // We only expect tool's output on the stdout stream.
+                XCTAssertMatch(stdout, .contains("sentinel"))
+                XCTAssertMatch(stdout, .contains("\(fixturePath)"))
+
+                // swift-build-tool output should go to stderr.
+                XCTAssertMatch(stderr, .regex("Compiling"))
+                XCTAssertMatch(stderr, .contains("Linking"))
+            }
+        }
+    #endif
 
     func testNumWorkersParallelRequirement() async throws {
         #if !os(macOS)
@@ -80,6 +115,15 @@ final class TestCommandTests: CommandsTestCase {
         try await fixture(name: "Miscellaneous/TestableExe") { fixturePath in
             do {
                 let result = try await execute(["--enable-testable-imports", "--vv"], packagePath: fixturePath)
+                XCTAssertMatch(result.stderr, .contains("-enable-testing"))
+            }
+        }
+    }
+
+    func testWithReleaseConfiguration() async throws {
+        try await fixture(name: "Miscellaneous/TestableExe") { fixturePath in
+            do {
+                let result = try await execute(["-c", "release", "--vv"], packagePath: fixturePath)
                 XCTAssertMatch(result.stderr, .contains("-enable-testing"))
             }
         }
@@ -139,16 +183,191 @@ final class TestCommandTests: CommandsTestCase {
         try await fixture(name: "Miscellaneous/EmptyTestsPkg") { fixturePath in
             let xUnitOutput = fixturePath.appending("result.xml")
             // Run tests in parallel with verbose output.
-            let stdout = try await SwiftPM.Test.execute(["--parallel", "--verbose", "--xunit-output", xUnitOutput.pathString], packagePath: fixturePath).stdout
-            // in "swift test" test output goes to stdout
-            XCTAssertNoMatch(stdout, .contains("passed"))
-            XCTAssertNoMatch(stdout, .contains("failed"))
+            _ = try await SwiftPM.Test.execute(["--parallel", "--verbose", "--xunit-output", xUnitOutput.pathString], packagePath: fixturePath).stdout
 
             // Check the xUnit output.
             XCTAssertFileExists(xUnitOutput)
             let contents: String = try localFileSystem.readFileContents(xUnitOutput)
             XCTAssertMatch(contents, .contains("tests=\"0\" failures=\"0\""))
         }
+    }
+
+    enum TestRunner {
+        case XCTest
+        case SwiftTesting
+
+        var fileSuffix: String {
+            switch self {
+                case .XCTest: return ""
+                case .SwiftTesting: return "-swift-testing"
+            }
+        }
+    }
+    func _testSwiftTestXMLOutputFailureMessage(
+        fixtureName: String,
+        testRunner: TestRunner,
+        enableExperimentalFlag: Bool,
+        matchesPattern: [StringPattern]
+    ) async throws {
+        try await fixture(name: fixtureName) { fixturePath in
+            // GIVEN we have a Package with a failing \(testRunner) test cases
+            let xUnitOutput = fixturePath.appending("result.xml")
+            let xUnitUnderTest = fixturePath.appending("result\(testRunner.fileSuffix).xml")
+
+            // WHEN we execute swift-test in parallel while specifying xUnit generation
+            let extraCommandArgs = enableExperimentalFlag ? ["--experimental-xunit-message-failure"]: [],
+            _ = try await execute(
+                [
+                    "--parallel",
+                    "--verbose",
+                    "--enable-swift-testing",
+                    "--enable-xctest",
+                    "--xunit-output",
+                    xUnitOutput.pathString
+                ] + extraCommandArgs,
+                packagePath: fixturePath,
+                throwIfCommandFails: false
+            )
+
+            // THEN we expect \(xUnitUnderTest) to exists
+            XCTAssertFileExists(xUnitUnderTest)
+            let contents: String = try localFileSystem.readFileContents(xUnitUnderTest)
+            // AND that the xUnit file has the expected contents
+            for match in matchesPattern {
+                XCTAssertMatch(contents, match)
+            }
+        }
+    }
+
+    func testSwiftTestXMLOutputVerifySingleTestFailureMessageWithFlagEnabledXCTest() async throws {
+        try await self._testSwiftTestXMLOutputFailureMessage(
+            fixtureName: "Miscellaneous/TestSingleFailureXCTest",
+            testRunner: .XCTest,
+            enableExperimentalFlag: true,
+            matchesPattern: [.contains("Purposely failing &amp; validating XML espace &quot;'&lt;&gt;")]
+        )
+    }
+
+    func testSwiftTestXMLOutputVerifySingleTestFailureMessageWithFlagEnabledSwiftTesting() async throws {
+        #if compiler(<6)
+        _ = XCTSkip("Swift Testing is not available by default in this Swift compiler version")
+        #else
+        try await self._testSwiftTestXMLOutputFailureMessage(
+            fixtureName: "Miscellaneous/TestSingleFailureSwiftTesting",
+            testRunner: .SwiftTesting,
+            enableExperimentalFlag: true,
+            matchesPattern: [.contains("Purposely failing &amp; validating XML espace &quot;'&lt;&gt;")]
+        )
+        #endif
+    }
+    func testSwiftTestXMLOutputVerifySingleTestFailureMessageWithFlagDisabledXCTest() async throws {
+        try await self._testSwiftTestXMLOutputFailureMessage(
+            fixtureName: "Miscellaneous/TestSingleFailureXCTest",
+            testRunner: .XCTest,
+            enableExperimentalFlag: false,
+            matchesPattern: [.contains("failure")]
+        )
+    }
+
+    func testSwiftTestXMLOutputVerifySingleTestFailureMessageWithFlagDisabledSwiftTesting() async throws {
+        #if compiler(<6)
+        _ = XCTSkip("Swift Testing is not available by default in this Swift compiler version")
+        #else
+        try await self._testSwiftTestXMLOutputFailureMessage(
+            fixtureName: "Miscellaneous/TestSingleFailureSwiftTesting",
+            testRunner: .SwiftTesting,
+            enableExperimentalFlag: false,
+            matchesPattern: [.contains("Purposely failing &amp; validating XML espace &quot;'&lt;&gt;")]
+        )
+        #endif
+    }
+
+    func testSwiftTestXMLOutputVerifyMultipleTestFailureMessageWithFlagEnabledXCTest() async throws {
+        try await self._testSwiftTestXMLOutputFailureMessage(
+            fixtureName: "Miscellaneous/TestMultipleFailureXCTest",
+            testRunner: .XCTest,
+            enableExperimentalFlag: true,
+            matchesPattern: [
+                .contains("Test failure 1"),
+                .contains("Test failure 2"),
+                .contains("Test failure 3"),
+                .contains("Test failure 4"),
+                .contains("Test failure 5"),
+                .contains("Test failure 6"),
+                .contains("Test failure 7"),
+                .contains("Test failure 8"),
+                .contains("Test failure 9"),
+                .contains("Test failure 10")
+            ]
+        )
+    }
+
+    func testSwiftTestXMLOutputVerifyMultipleTestFailureMessageWithFlagEnabledSwiftTesting() async throws {
+        #if compiler(<6)
+        _ = XCTSkip("Swift Testing is not available by default in this Swift compiler version")
+        #else
+        try await self._testSwiftTestXMLOutputFailureMessage(
+            fixtureName: "Miscellaneous/TestMultipleFailureSwiftTesting",
+            testRunner: .SwiftTesting,
+            enableExperimentalFlag: true,
+            matchesPattern: [
+                .contains("ST Test failure 1"),
+                .contains("ST Test failure 2"),
+                .contains("ST Test failure 3"),
+                .contains("ST Test failure 4"),
+                .contains("ST Test failure 5"),
+                .contains("ST Test failure 6"),
+                .contains("ST Test failure 7"),
+                .contains("ST Test failure 8"),
+                .contains("ST Test failure 9"),
+                .contains("ST Test failure 10")
+            ]
+        )
+        #endif
+    }
+
+    func testSwiftTestXMLOutputVerifyMultipleTestFailureMessageWithFlagDisabledXCTest() async throws {
+        try await self._testSwiftTestXMLOutputFailureMessage(
+            fixtureName: "Miscellaneous/TestMultipleFailureXCTest",
+            testRunner: .XCTest,
+            enableExperimentalFlag: false,
+            matchesPattern: [
+                .contains("failure"),
+                .contains("failure"),
+                .contains("failure"),
+                .contains("failure"),
+                .contains("failure"),
+                .contains("failure"),
+                .contains("failure"),
+                .contains("failure"),
+                .contains("failure"),
+                .contains("failure")
+            ]
+        )
+    }
+
+    func testSwiftTestXMLOutputVerifyMultipleTestFailureMessageWithFlagDisabledSwiftTesting() async throws {
+        #if compiler(<6)
+        _ = XCTSkip("Swift Testing is not available by default in this Swift compiler version")
+        #else
+        try await self._testSwiftTestXMLOutputFailureMessage(
+            fixtureName: "Miscellaneous/TestMultipleFailureSwiftTesting",
+            testRunner: .SwiftTesting,
+            enableExperimentalFlag: false,
+            matchesPattern: [
+                .contains("ST Test failure 1"),
+                .contains("ST Test failure 2"),
+                .contains("ST Test failure 3"),
+                .contains("ST Test failure 4"),
+                .contains("ST Test failure 5"),
+                .contains("ST Test failure 6"),
+                .contains("ST Test failure 7"),
+                .contains("ST Test failure 8"),
+                .contains("ST Test failure 9"),
+                .contains("ST Test failure 10")
+            ]
+        )
+        #endif
     }
 
     func testSwiftTestFilter() async throws {
@@ -191,13 +410,12 @@ final class TestCommandTests: CommandsTestCase {
         }
 
         try await fixture(name: "Miscellaneous/SkipTests") { fixturePath in
-            let (stdout, stderr) = try await SwiftPM.Test.execute(["--skip", "Tests"], packagePath: fixturePath)
+            let (stdout, _) = try await SwiftPM.Test.execute(["--skip", "Tests"], packagePath: fixturePath)
             // in "swift test" test output goes to stdout
             XCTAssertNoMatch(stdout, .contains("testExample1"))
             XCTAssertNoMatch(stdout, .contains("testExample2"))
             XCTAssertNoMatch(stdout, .contains("testExample3"))
             XCTAssertNoMatch(stdout, .contains("testExample4"))
-            XCTAssertMatch(stderr, .contains("No matching test cases were run"))
         }
     }
 
@@ -279,11 +497,39 @@ final class TestCommandTests: CommandsTestCase {
         }
     }
 
+    func testListWithSkipBuildAndNoBuildArtifacts() async throws {
+        try await fixture(name: "Miscellaneous/TestDiscovery/Simple") { fixturePath in
+            await XCTAssertThrowsCommandExecutionError(
+                try await SwiftPM.Test.execute(["list", "--skip-build"], packagePath: fixturePath)
+            ) { error in
+                XCTAssertMatch(error.stderr, .contains("Test build artifacts were not found in the build folder"))
+            }
+        }
+    }
+
     func testBasicSwiftTestingIntegration() async throws {
+#if !canImport(TestingDisabled)
         try XCTSkipUnless(
             nil != Environment.current["SWIFT_PM_SWIFT_TESTING_TESTS_ENABLED"],
             "Skipping \(#function) because swift-testing tests are not explicitly enabled"
         )
+#endif
+
+        try await fixture(name: "Miscellaneous/TestDiscovery/SwiftTesting") { fixturePath in
+            do {
+                let (stdout, _) = try await SwiftPM.Test.execute(["--enable-swift-testing", "--disable-xctest"], packagePath: fixturePath)
+                XCTAssertMatch(stdout, .contains(#"Test "SOME TEST FUNCTION" started"#))
+            }
+        }
+    }
+
+    func testBasicSwiftTestingIntegration_ExperimentalFlag() async throws {
+#if !canImport(TestingDisabled)
+        try XCTSkipUnless(
+            nil != Environment.current["SWIFT_PM_SWIFT_TESTING_TESTS_ENABLED"],
+            "Skipping \(#function) because swift-testing tests are not explicitly enabled"
+        )
+#endif
 
         try await fixture(name: "Miscellaneous/TestDiscovery/SwiftTesting") { fixturePath in
             do {
@@ -313,9 +559,56 @@ final class TestCommandTests: CommandsTestCase {
     }
 #endif
 
+#if os(macOS)
+    // "SWIFT_TESTING_ENABLED" is set only on macOS, skip the check on other platforms.
     func testLibraryEnvironmentVariable() async throws {
         try await fixture(name: "Miscellaneous/CheckTestLibraryEnvironmentVariable") { fixturePath in
             await XCTAssertAsyncNoThrow(try await SwiftPM.Test.execute(packagePath: fixturePath))
         }
     }
+#endif
+
+    func testXCTestOnlyDoesNotLogAboutNoMatchingTests() async throws {
+        try await fixture(name: "Miscellaneous/TestDiscovery/Simple") { fixturePath in
+            let (_, stderr) = try await SwiftPM.Test.execute(["--disable-swift-testing"], packagePath: fixturePath)
+            XCTAssertNoMatch(stderr, .contains("No matching test cases were run"))
+        }
+    }
+
+    func testFatalErrorDisplayedCorrectNumberOfTimesWhenSingleXCTestHasFatalErrorInBuildCompilation() async throws {
+        // Test for GitHub Issue #6605
+        // GIVEN we have a Swift Package that has a fatalError building the tests
+        #if compiler(>=6)
+        let expected = 1
+        #else
+        let expected = 2
+        #endif
+        try await fixture(name: "Miscellaneous/Errors/FatalErrorInSingleXCTest/TypeLibrary") { fixturePath in
+            // WHEN swift-test is executed
+            await XCTAssertAsyncThrowsError(try await self.execute([], packagePath: fixturePath)) { error in
+                // THEN I expect a failure
+                guard case SwiftPMError.executionFailure(_, let stdout, let stderr) = error else {
+                    XCTFail("Building the package was expected to fail, but it was successful")
+                    return
+                }
+
+                let matchString = "error: fatalError"
+                let stdoutMatches = getNumberOfMatches(of: matchString, in: stdout)
+                let stderrMatches = getNumberOfMatches(of: matchString, in: stderr)
+                let actualNumMatches = stdoutMatches + stderrMatches
+
+                // AND a fatal error message is printed \(expected) times
+                XCTAssertEqual(
+                    actualNumMatches,
+                    expected,
+                    [
+                        "Actual (\(actualNumMatches)) is not as expected (\(expected))",
+                        "stdout: \(stdout.debugDescription)",
+                        "stderr: \(stderr.debugDescription)"
+                    ].joined(separator: "\n")
+                )
+            }
+        }
+    }
+
 }

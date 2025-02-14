@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import struct Basics.AbsolutePath
+import class Basics.InMemoryFileSystem
 import class Basics.ObservabilitySystem
 import class Basics.ObservabilityScope
 
@@ -24,7 +25,6 @@ import struct PackageModel.ProductDescription
 import enum PackageModel.ProductType
 import struct PackageModel.TargetDescription
 import protocol TSCBasic.FileSystem
-import class TSCBasic.InMemoryFileSystem
 
 package typealias MockPackageGraph = (
     graph: ModulesGraph,
@@ -137,6 +137,7 @@ package func macrosTestsPackageGraph() throws -> MockPackageGraph {
         "/swift-mmio/Sources/MMIOMacros/source.swift",
         "/swift-mmio/Sources/MMIOMacrosTests/source.swift",
         "/swift-mmio/Sources/MMIOMacro+PluginTests/source.swift",
+        "/swift-mmio/Sources/NOOPTests/source.swift",
         "/swift-syntax/Sources/SwiftSyntax/source.swift",
         "/swift-syntax/Sources/SwiftSyntaxMacrosTestSupport/source.swift",
         "/swift-syntax/Sources/SwiftSyntaxMacros/source.swift",
@@ -203,10 +204,15 @@ package func macrosTestsPackageGraph() throws -> MockPackageGraph {
                             .target(name: "MMIOMacros")
                         ],
                         type: .test
+                    ),
+                    TargetDescription(
+                        name: "NOOPTests",
+                        dependencies: [],
+                        type: .test
                     )
                 ]
             ),
-            Manifest.createFileSystemManifest(
+            Manifest.createRootManifest(
                 displayName: "swift-syntax",
                 path: "/swift-syntax",
                 products: [

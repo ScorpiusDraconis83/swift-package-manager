@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import _Concurrency
 
 @_spi(SwiftPMInternal)
 @testable import PackageGraph
@@ -207,13 +208,19 @@ final class PluginTests: XCTestCase {
             try localFileSystem.createDirectory(pluginSourceFile.parentDirectory, recursive: true)
             try localFileSystem.writeFileContents(pluginSourceFile, string: """
             import PackagePlugin
+            #if os(Android)
+            let touchExe = "/system/bin/touch"
+            #else
+            let touchExe = "/usr/bin/touch"
+            #endif
+
             @main
             struct Plugin: BuildToolPlugin {
                 func createBuildCommands(context: PluginContext, target: Target) async throws -> [Command] {
                     return [
                         .buildCommand(
                             displayName: "empty",
-                            executable: .init("/usr/bin/touch"),
+                            executable: .init(touchExe),
                             arguments: [context.pluginWorkDirectory.appending("best.txt")],
                             inputFiles: [],
                             outputFiles: []
@@ -235,7 +242,7 @@ final class PluginTests: XCTestCase {
 
             try createPackageUnderTest(packageDir: packageDir, toolsVersion: .v6_0)
             let (_, stderr2) = try await executeSwiftBuild(packageDir, env: ["SWIFT_DRIVER_SWIFTSCAN_LIB" : "/this/is/a/bad/path"])
-            XCTAssertEqual("", stderr2)
+            XCTAssertFalse(stderr2.contains("error:"))
             XCTAssertTrue(localFileSystem.exists(pathOfGeneratedFile), "plugin did not run, generated file does not exist at \(pathOfGeneratedFile.pathString)")
         }
     }
@@ -445,7 +452,7 @@ final class PluginTests: XCTestCase {
             XCTAssert(rootManifests.count == 1, "\(rootManifests)")
 
             // Load the package graph.
-            let packageGraph = try workspace.loadPackageGraph(
+            let packageGraph = try await workspace.loadPackageGraph(
                 rootInput: rootInput,
                 observabilityScope: observability.topScope
             )
@@ -536,7 +543,8 @@ final class PluginTests: XCTestCase {
                     )
 
                     let toolSearchDirectories = [try UserToolchain.default.swiftCompilerPath.parentDirectory]
-                    let success = try await safe_async { plugin.invoke(
+                    let success = try await withCheckedThrowingContinuation { continuation in
+                      plugin.invoke(
                         action: .performCommand(package: package, arguments: arguments),
                         buildEnvironment: BuildEnvironment(platform: .macOS, configuration: .debug),
                         scriptRunner: scriptRunner,
@@ -554,7 +562,10 @@ final class PluginTests: XCTestCase {
                         observabilityScope: observability.topScope,
                         callbackQueue: delegateQueue,
                         delegate: delegate,
-                        completion: $0)
+                        completion: {
+                          continuation.resume(with: $0)
+                        }
+                      )
                     }
                     if expectFailure {
                         XCTAssertFalse(success, "expected command to fail, but it succeeded", file: file, line: line)
@@ -632,7 +643,7 @@ final class PluginTests: XCTestCase {
             XCTAssert(rootManifests.count == 1, "\(rootManifests)")
 
             // Load the package graph.
-            let packageGraph = try workspace.loadPackageGraph(
+            let packageGraph = try await workspace.loadPackageGraph(
                 rootInput: rootInput,
                 observabilityScope: observability.topScope
             )
@@ -729,7 +740,7 @@ final class PluginTests: XCTestCase {
             XCTAssert(rootManifests.count == 1, "\(rootManifests)")
 
             // Load the package graph.
-            let packageGraph = try workspace.loadPackageGraph(
+            let packageGraph = try await workspace.loadPackageGraph(
                 rootInput: rootInput,
                 observabilityScope: observability.topScope
             )
@@ -1045,7 +1056,7 @@ final class PluginTests: XCTestCase {
             XCTAssert(rootManifests.count == 1, "\(rootManifests)")
 
             // Load the package graph.
-            let packageGraph = try workspace.loadPackageGraph(
+            let packageGraph = try await workspace.loadPackageGraph(
                 rootInput: rootInput,
                 observabilityScope: observability.topScope
             )

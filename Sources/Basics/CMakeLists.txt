@@ -11,13 +11,13 @@ add_library(Basics
   Archiver/TarArchiver.swift
   Archiver/ZipArchiver.swift
   Archiver/UniversalArchiver.swift
-  AsyncProcess.swift
   AuthorizationProvider.swift
   Cancellator.swift
   Collections/ByteString+Extensions.swift
   Collections/Dictionary+Extensions.swift
   Collections/IdentifiableSet.swift
   Collections/String+Extensions.swift
+  Concurrency/AsyncProcess.swift
   Concurrency/ConcurrencyHelpers.swift
   Concurrency/NSLock+Extensions.swift
   Concurrency/SendableBox.swift
@@ -70,18 +70,20 @@ add_library(Basics
   Serialization/SerializedJSON.swift
   SwiftVersion.swift
   SQLiteBackedCache.swift
+  TestingLibrary.swift
   Triple+Basics.swift
+  URL.swift
   Version+Extensions.swift
   WritableByteStream+Extensions.swift
   Vendor/Triple.swift
   Vendor/Triple+Platforms.swift)
 target_link_libraries(Basics PUBLIC
-  SwiftCollections::DequeModule
+  _AsyncFileSystem
   SwiftCollections::OrderedCollections
-  SwiftSystem::SystemPackage
   TSCBasic
   TSCUtility)
 target_link_libraries(Basics PRIVATE
+  SwiftCollections::DequeModule
   SPMSQLite3
   TSCclibc)
 

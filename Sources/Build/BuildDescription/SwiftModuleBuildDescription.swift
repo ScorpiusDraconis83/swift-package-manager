@@ -15,6 +15,8 @@ import Basics
 import Foundation
 import PackageGraph
 import PackageLoading
+
+@_spi(SwiftPMInternal)
 import PackageModel
 
 @_spi(SwiftPMInternal)
@@ -48,6 +50,14 @@ public final class SwiftModuleBuildDescription {
 
     /// The build parameters for this target.
     let buildParameters: BuildParameters
+
+    /// The destination for while this module is built.
+    public var destination: BuildParameters.Destination {
+        self.buildParameters.destination
+    }
+
+    /// The build parameters for the macro dependencies of this target.
+    let macroBuildParameters: BuildParameters
 
     /// Path to the temporary directory for this target.
     let tempsPath: AbsolutePath
@@ -96,6 +106,16 @@ public final class SwiftModuleBuildDescription {
     /// The list of all resource files in the target, including the derived ones.
     public var resources: [Resource] {
         self.target.underlying.resources + self.pluginDerivedResources
+    }
+
+    /// The list of files in the target that were marked as ignored.
+    public var ignored: [AbsolutePath] {
+        self.target.underlying.ignored
+    }
+
+    /// The list of other kinds of files in the target.
+    public var others: [AbsolutePath] {
+        self.target.underlying.others
     }
 
     /// The objects in this target, containing either machine code or bitcode
@@ -235,10 +255,15 @@ public final class SwiftModuleBuildDescription {
     public let buildToolPluginInvocationResults: [BuildToolPluginInvocationResult]
 
     /// The results of running any prebuild commands for this target.
-    public let prebuildCommandResults: [PrebuildCommandResult]
+    public let prebuildCommandResults: [CommandPluginResult]
 
-    /// Any macro products that this target requires to build.
-    public let requiredMacroProducts: [ProductBuildDescription]
+    public var requiredMacros: [ResolvedModule] {
+        get throws {
+            try self.target.recursiveModuleDependencies().filter {
+                $0.type == .macro
+            }
+        }
+    }
 
     /// ObservabilityScope with which to emit diagnostics
     private let observabilityScope: ObservabilityScope
@@ -249,6 +274,9 @@ public final class SwiftModuleBuildDescription {
     /// Whether to disable sandboxing (e.g. for macros).
     private let shouldDisableSandbox: Bool
 
+    /// Whether to add -static on Windows to reduce symbol exports
+    public var isWindowsStatic: Bool
+
     /// Create a new target description with target and build parameters.
     init(
         package: ResolvedPackage,
@@ -256,9 +284,9 @@ public final class SwiftModuleBuildDescription {
         toolsVersion: ToolsVersion,
         additionalFileRules: [FileRuleDescription] = [],
         buildParameters: BuildParameters,
+        macroBuildParameters: BuildParameters,
         buildToolPluginInvocationResults: [BuildToolPluginInvocationResult] = [],
-        prebuildCommandResults: [PrebuildCommandResult] = [],
-        requiredMacroProducts: [ProductBuildDescription] = [],
+        prebuildCommandResults: [CommandPluginResult] = [],
         testTargetRole: TestTargetRole? = nil,
         shouldGenerateTestObservation: Bool = false,
         shouldDisableSandbox: Bool,
@@ -274,6 +302,7 @@ public final class SwiftModuleBuildDescription {
         self.target = target
         self.toolsVersion = toolsVersion
         self.buildParameters = buildParameters
+        self.macroBuildParameters = macroBuildParameters
 
         // Unless mentioned explicitly, use the target type to determine if this is a test target.
         if let testTargetRole {
@@ -288,7 +317,6 @@ public final class SwiftModuleBuildDescription {
         self.derivedSources = Sources(paths: [], root: self.tempsPath.appending("DerivedSources"))
         self.buildToolPluginInvocationResults = buildToolPluginInvocationResults
         self.prebuildCommandResults = prebuildCommandResults
-        self.requiredMacroProducts = requiredMacroProducts
         self.shouldGenerateTestObservation = shouldGenerateTestObservation
         self.shouldDisableSandbox = shouldDisableSandbox
         self.fileSystem = fileSystem
@@ -303,6 +331,9 @@ public final class SwiftModuleBuildDescription {
             prebuildCommandResults: prebuildCommandResults,
             observabilityScope: observabilityScope
         )
+
+        // default to -static on Windows
+        self.isWindowsStatic = buildParameters.triple.isWindows()
 
         if self.shouldEmitObjCCompatibilityHeader {
             self.moduleMap = try self.generateModuleMap()
@@ -338,7 +369,7 @@ public final class SwiftModuleBuildDescription {
             return
         }
 
-        guard 
+        guard
             self.buildParameters.triple.isDarwin() &&
             self.buildParameters.testingParameters.experimentalTestOutput
         else {
@@ -415,17 +446,17 @@ public final class SwiftModuleBuildDescription {
         var args = [String]()
 
         #if BUILD_MACROS_AS_DYLIBS
-        self.requiredMacroProducts.forEach { macro in
-            args += ["-Xfrontend", "-load-plugin-library", "-Xfrontend", macro.binaryPath.pathString]
+        try self.requiredMacros.forEach { macro in
+            args += [
+                "-Xfrontend", "-load-plugin-library",
+                "-Xfrontend", macroBuildParameters.macroBinaryPath(macro).pathString
+            ]
         }
         #else
-        try self.requiredMacroProducts.forEach { macro in
-            if let macroTarget = macro.product.modules.first {
-                let executablePath = try macro.binaryPath.pathString
-                args += ["-Xfrontend", "-load-plugin-executable", "-Xfrontend", "\(executablePath)#\(macroTarget.c99name)"]
-            } else {
-                throw InternalError("macro product \(macro.product.name) has no targets") // earlier validation should normally catch this
-            }
+        let macroModules = try self.requiredMacros
+        try macroModules.forEach { macro in
+            let executablePath = try macroBuildParameters.macroBinaryPath(macro).pathString
+            args += ["-Xfrontend", "-load-plugin-executable", "-Xfrontend", "\(executablePath)#\(macro.c99name)"]
         }
         #endif
 
@@ -439,7 +470,7 @@ public final class SwiftModuleBuildDescription {
                 args += ["-disable-sandbox"]
             } else {
                 // If there's at least one macro being used, we warn about our inability to disable sandboxing.
-                if !self.requiredMacroProducts.isEmpty {
+                if !macroModules.isEmpty {
                     observabilityScope.emit(warning: "cannot disable sandboxing for Swift compilation because the selected toolchain does not support it")
                 }
             }
@@ -458,14 +489,9 @@ public final class SwiftModuleBuildDescription {
             args += ["-v"]
         }
 
-        // Enable batch mode in debug mode.
-        //
-        // Technically, it should be enabled whenever WMO is off but we
-        // don't currently make that distinction in SwiftPM
-        switch self.buildParameters.configuration {
-        case .debug:
+        // Enable batch mode whenever WMO is off.
+        if !self.useWholeModuleOptimization {
             args += ["-enable-batch-mode"]
-        case .release: break
         }
 
         args += self.buildParameters.indexStoreArguments(for: self.target)
@@ -509,6 +535,11 @@ public final class SwiftModuleBuildDescription {
             args += ["-parse-as-library"]
         }
 
+        // Add -static to reduce symbol export count
+        if self.isWindowsStatic {
+            args += ["-static"]
+        }
+
         // Only add the build path to the framework search path if there are binary frameworks to link against.
         if !self.libraryBinaryPaths.isEmpty {
             args += ["-F", self.buildParameters.buildPath.pathString]
@@ -541,14 +572,19 @@ public final class SwiftModuleBuildDescription {
             args += ["-emit-module-interface-path", self.parseableModuleInterfaceOutputPath.pathString]
         }
 
-        if self.buildParameters.prepareForIndexing {
+        switch self.buildParameters.prepareForIndexing {
+        case .off:
+            break
+        case .on:
+            args += ["-Xfrontend", "-experimental-lazy-typecheck",]
             if !args.contains("-enable-testing") {
                 // enable-testing needs the non-exportable-decls
                 args += ["-Xfrontend", "-experimental-skip-non-exportable-decls"]
             }
+            fallthrough
+        case .noLazy:
             args += [
                 "-Xfrontend", "-experimental-skip-all-function-bodies",
-                "-Xfrontend", "-experimental-lazy-typecheck",
                 "-Xfrontend", "-experimental-allow-module-with-compiler-errors",
                 "-Xfrontend", "-empty-abi-descriptor"
             ]
@@ -594,7 +630,7 @@ public final class SwiftModuleBuildDescription {
 
         // Pass `-user-module-version` for versioned packages that aren't pre-releases.
         if
-          let version = package.manifest.version, 
+          let version = package.manifest.version,
           version.prereleaseIdentifiers.isEmpty &&
           version.buildMetadataIdentifiers.isEmpty &&
           toolsVersion >= .v6_0
@@ -607,7 +643,7 @@ public final class SwiftModuleBuildDescription {
             isPackageNameSupported: self.buildParameters.driverParameters.isPackageAccessModifierSupported
         )
         args += try self.macroArguments()
-        
+
         // rdar://117578677
         // Pass -fno-omit-frame-pointer to support backtraces
         // this can be removed once the backtracer uses DWARF instead of frame pointers
@@ -621,11 +657,16 @@ public final class SwiftModuleBuildDescription {
 
         return args
     }
-    
+
     /// Determines the arguments needed to run `swift-symbolgraph-extract` for
     /// this module.
     package func symbolGraphExtractArguments() throws -> [String] {
         var args = [String]()
+
+        args += ["-module-name", self.target.c99name]
+        args += try self.buildParameters.tripleArgs(for: self.target)
+        args += ["-module-cache-path", try self.buildParameters.moduleCache.pathString]
+
         args += try self.cxxInteroperabilityModeArguments(
             propagateFromCurrentModuleOtherSwiftFlags: true)
 
@@ -699,9 +740,14 @@ public final class SwiftModuleBuildDescription {
         return []
     }
 
-    /// When `scanInvocation` argument is set to `true`, omit the side-effect producing arguments
-    /// such as emitting a module or supplementary outputs.
-    public func emitCommandLine(scanInvocation: Bool = false) throws -> [String] {
+    /// - Parameters:
+    ///   - scanInvocation: When `true`, omit the side-effect producing arguments such as emitting a module or
+    ///     supplementary outputs.
+    ///   - writeOutputFileMap: When `false`, we assume that an output file map for this command line already exists at
+    ///     the expected location on disk. This is intended for SourceKit-LSP to get build settings for a file without
+    ///     writing out an output file map as a side effect. We expect that preparation of the module has already
+    ///     created the output file map.
+    public func emitCommandLine(scanInvocation: Bool = false, writeOutputFileMap: Bool = true) throws -> [String] {
         var result: [String] = []
         result.append(self.buildParameters.toolchain.swiftCompilerPath.pathString)
 
@@ -722,11 +768,15 @@ public final class SwiftModuleBuildDescription {
             result.append(self.moduleOutputPath.pathString)
 
             result.append("-output-file-map")
-            // FIXME: Eliminate side effect.
-            result.append(try self.writeOutputFileMap().pathString)
+            let outputFileMapPath = self.tempsPath.appending("output-file-map.json")
+            if writeOutputFileMap {
+                // FIXME: Eliminate side effect.
+                try self.writeOutputFileMap(to: outputFileMapPath)
+            }
+            result.append(outputFileMapPath.pathString)
         }
 
-        if self.buildParameters.useWholeModuleOptimization {
+        if self.useWholeModuleOptimization {
             result.append("-whole-module-optimization")
             result.append("-num-threads")
             result.append(String(ProcessInfo.processInfo.activeProcessorCount))
@@ -749,8 +799,7 @@ public final class SwiftModuleBuildDescription {
         self.buildParameters.triple.isDarwin() && self.target.type == .library
     }
 
-    func writeOutputFileMap() throws -> AbsolutePath {
-        let path = self.tempsPath.appending("output-file-map.json")
+    func writeOutputFileMap(to path: AbsolutePath) throws {
         let masterDepsPath = self.tempsPath.appending("master.swiftdeps")
 
         var content =
@@ -760,7 +809,7 @@ public final class SwiftModuleBuildDescription {
 
             """#
 
-        if self.buildParameters.useWholeModuleOptimization {
+        if self.useWholeModuleOptimization {
             let moduleName = self.target.c99name
             content +=
                 #"""
@@ -808,7 +857,7 @@ public final class SwiftModuleBuildDescription {
 
                 """#
 
-            if !self.buildParameters.useWholeModuleOptimization {
+            if !self.useWholeModuleOptimization {
                 let depsPath = self.tempsPath.appending(component: sourceFileName + ".d")
                 content +=
                     #"""
@@ -832,7 +881,6 @@ public final class SwiftModuleBuildDescription {
 
         try fileSystem.createDirectory(path.parentDirectory, recursive: true)
         try self.fileSystem.writeFileContents(path, bytes: .init(encodingAsUTF8: content), atomically: true)
-        return path
     }
 
     /// Generates the module map for the Swift target and returns its path.
@@ -934,8 +982,16 @@ public final class SwiftModuleBuildDescription {
         if self.isTestTarget {
             // test targets must be built with -enable-testing
             // since its required for test discovery (the non objective-c reflection kind)
-            return ["-enable-testing"]
-        } else if self.buildParameters.testingParameters.enableTestability {
+            var result = ["-enable-testing"]
+
+            // Test targets need to enable cross-import overlays because Swift
+            // Testing cannot directly link to most other modules and needs to
+            // provide API that works with e.g. Foundation. (Developers can
+            // override this flag by passing -disable-cross-import-overlays.)
+            result += ["-Xfrontend", "-enable-cross-import-overlays"]
+
+            return result
+        } else if self.buildParameters.enableTestability {
             return ["-enable-testing"]
         } else {
             return []
@@ -963,5 +1019,32 @@ public final class SwiftModuleBuildDescription {
         }
 
         return arguments
+    }
+
+    /// Whether to build Swift code with whole module optimization (WMO)
+    /// enabled.
+    package var useWholeModuleOptimization: Bool {
+        if self.target.underlying.isEmbeddedSwiftTarget { return true }
+
+        switch self.buildParameters.configuration {
+        case .debug:
+            return false
+        case .release:
+            return true
+        }
+    }
+}
+
+extension SwiftModuleBuildDescription {
+    package func dependencies(
+        using plan: BuildPlan
+    ) -> [ModuleBuildDescription.Dependency] {
+        ModuleBuildDescription.swift(self).dependencies(using: plan)
+    }
+
+    package func recursiveDependencies(
+        using plan: BuildPlan
+    ) -> [ModuleBuildDescription.Dependency] {
+        ModuleBuildDescription.swift(self).recursiveDependencies(using: plan)
     }
 }

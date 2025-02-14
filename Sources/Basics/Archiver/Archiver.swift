@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import _Concurrency
+import struct Foundation.URL
 
 /// The `Archiver` protocol abstracts away the different operations surrounding archives.
 public protocol Archiver: Sendable {
@@ -35,13 +36,10 @@ public protocol Archiver: Sendable {
     /// - Parameters:
     ///   - directory: The `AbsolutePath` to the archive to extract.
     ///   - destinationPath: The `AbsolutePath` to the directory to extract to.
-    ///   - completion: The completion handler that will be called when the operation finishes to notify of its success.
-    @available(*, noasync, message: "Use the async alternative")
     func compress(
         directory: AbsolutePath,
-        to destinationPath: AbsolutePath,
-        completion: @escaping @Sendable (Result<Void, Error>) -> Void
-    )
+        to destinationPath: AbsolutePath
+    ) async throws
 
     /// Asynchronously validates if a file is an archive.
     ///
@@ -70,20 +68,6 @@ extension Archiver {
         }
     }
 
-    /// Asynchronously compresses the contents of a directory to a destination archive.
-    ///
-    /// - Parameters:
-    ///   - directory: The `AbsolutePath` to the archive to extract.
-    ///   - destinationPath: The `AbsolutePath` to the directory to extract to.
-    public func compress(
-        directory: AbsolutePath,
-        to destinationPath: AbsolutePath
-    ) async throws {
-        try await withCheckedThrowingContinuation { continuation in
-            self.compress(directory: directory, to: destinationPath, completion: { continuation.resume(with: $0) })
-        }
-    }
-
     /// Asynchronously validates if a file is an archive.
     ///
     /// - Parameters:
@@ -94,5 +78,9 @@ extension Archiver {
         try await withCheckedThrowingContinuation { continuation in
             self.validate(path: path, completion: { continuation.resume(with: $0) })
         }
+    }
+
+    package func isFileSupported(_ lastPathComponent: String) -> Bool {
+        self.supportedExtensions.contains(where: { lastPathComponent.hasSuffix($0) })
     }
 }

@@ -11,6 +11,7 @@
 //===----------------------------------------------------------------------===//
 
 import Basics
+import _Concurrency
 import Dispatch
 import Foundation
 import PackageLoading
@@ -51,14 +52,14 @@ public class RegistryDownloadsManager: Cancellable {
         delegateQueue: DispatchQueue,
         callbackQueue: DispatchQueue
     ) async throws -> AbsolutePath {
-        try await safe_async {
+        try await withCheckedThrowingContinuation { continuation in
             self.lookup(
                 package: package,
                 version: version,
                 observabilityScope: observabilityScope,
                 delegateQueue: delegateQueue,
                 callbackQueue: callbackQueue,
-                completion: $0
+                completion: { continuation.resume(with: $0) }
             )
         }
     }
@@ -247,7 +248,7 @@ public class RegistryDownloadsManager: Cancellable {
 
         // utility to update progress
 
-        func updateDownloadProgress(downloaded: Int64, total: Int64?) {
+        @Sendable func updateDownloadProgress(downloaded: Int64, total: Int64?) {
             delegateQueue.async {
                 self.delegate?.fetching(
                     package: package,
