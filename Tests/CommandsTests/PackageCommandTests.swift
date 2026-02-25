@@ -6666,6 +6666,7 @@ struct PackageCommandTests {
             .tags(
                 .Feature.Command.Package.CommandPlugin,
             ),
+            .skip("https://github.com/swiftlang/swift-package-manager/issues/9775"),
             arguments: SupportedBuildSystemOnAllPlatforms,
         )
         func commandPluginBuildingCallbacks(
